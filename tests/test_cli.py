@@ -54,6 +54,39 @@ udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS quer
 """
 
 
+ATTACK_ALERTS_JSON = """\
+{"detector": "port_scan", "dst": "10.0.0.30", "evidence": {"ports": 15, "sample": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "seconds": 0.14}, "message": "10.9.9.1 probed 15 ports on 10.0.0.30 in 0.1s", "rule": "port-scan", "severity": "medium", "src": "10.9.9.1", "ts": "2023-11-14T22:13:20.140000Z", "ts_ns": 1700000000140000000}
+{"detector": "port_scan", "dst": "10.0.0.30", "evidence": {"ports": 15, "sample": [21, 22, 23, 24, 25, 26, 27, 28, 29, 30], "seconds": 0.7}, "message": "10.9.9.2 probed 15 ports on 10.0.0.30 in 0.7s", "rule": "port-scan", "severity": "medium", "src": "10.9.9.2", "ts": "2023-11-14T22:13:23.700000Z", "ts_ns": 1700000003700000000}
+{"detector": "port_scan", "dst": "10.0.0.30", "evidence": {"ports": 15, "sample": [21, 22, 23, 24, 25, 26, 27, 28, 29, 30], "seconds": 0.7}, "message": "10.9.9.3 probed 15 ports on 10.0.0.30 in 0.7s", "rule": "port-scan", "severity": "medium", "src": "10.9.9.3", "ts": "2023-11-14T22:13:24.700000Z", "ts_ns": 1700000004700000000}
+{"detector": "port_scan", "dst": "10.0.0.30", "evidence": {"ports": 15, "sample": [21, 22, 23, 24, 25, 26, 27, 28, 29, 30], "seconds": 0.7}, "message": "10.9.9.4 probed 15 ports on 10.0.0.30 in 0.7s", "rule": "port-scan", "severity": "medium", "src": "10.9.9.4", "ts": "2023-11-14T22:13:25.700000Z", "ts_ns": 1700000005700000000}
+{"detector": "port_scan", "dst": null, "evidence": {"hosts": 30, "port": 22, "seconds": 1.16}, "message": "10.9.9.5 probed port 22 on 30 hosts in 1.2s", "rule": "port-scan", "severity": "medium", "src": "10.9.9.5", "ts": "2023-11-14T22:13:29.160000Z", "ts_ns": 1700000009160000000}
+{"detector": "syn_flood", "dst": "10.0.0.2", "evidence": {"completed": 20, "port": 80, "seconds": 0.099, "sources": 100, "syns": 100}, "message": "100 SYNs to 10.0.0.2:80 in 0.1s from 100 sources, 20 completed", "rule": "syn-flood", "severity": "high", "src": null, "ts": "2023-11-14T22:13:32.099000Z", "ts_ns": 1700000012099000000}
+{"detector": "arp_spoof", "dst": "10.0.0.1", "evidence": {"ip": "10.0.0.1", "new_mac": "02:ee:00:00:06:66", "old_mac": "02:aa:00:00:00:01", "op": 2}, "message": "10.0.0.1 moved from 02:aa:00:00:00:01 to 02:ee:00:00:06:66", "rule": "arp-spoof", "severity": "high", "src": "02:ee:00:00:06:66", "ts": "2023-11-14T22:13:41.000000Z", "ts_ns": 1700000021000000000}
+{"detector": "arp_spoof", "dst": "10.0.0.1", "evidence": {"arp_mac": "02:aa:00:00:00:01", "ethernet_source": "02:ee:00:00:06:66", "ip": "10.0.0.1", "op": 2}, "message": "ARP says 10.0.0.1 is at 02:aa:00:00:00:01, but the frame came from 02:ee:00:00:06:66", "rule": "arp-spoof", "severity": "high", "src": "02:ee:00:00:06:66", "ts": "2023-11-14T22:13:42.000000Z", "ts_ns": 1700000022000000000}
+{"detector": "arp_spoof", "dst": "10.0.0.1", "evidence": {"ip": "10.0.0.1", "new_mac": "02:aa:00:00:00:01", "old_mac": "02:ee:00:00:06:66", "op": 2}, "message": "10.0.0.1 moved from 02:ee:00:00:06:66 to 02:aa:00:00:00:01", "rule": "arp-spoof", "severity": "high", "src": "02:aa:00:00:00:01", "ts": "2023-11-14T22:13:42.000000Z", "ts_ns": 1700000022000000000}
+{"detector": "dns_tunnel", "dst": null, "evidence": {"entropy": 4.594, "length": 49, "name": "thrbeobwung4fkxetkxyw2zxfyegdafb3is63n64ok3qvcp4.t.evil-cdn.test", "signal": "high_entropy"}, "message": "10.0.5.5 asked for a random-looking name under evil-cdn.test", "rule": "dns-tunnel", "severity": "medium", "src": "10.0.5.5", "ts": "2023-11-14T22:13:50.000000Z", "ts_ns": 1700000030000000000}
+{"detector": "dns_tunnel", "dst": null, "evidence": {"domain": "evil-cdn.test", "name": "f2bnefn35c7je47372ve3rjtbgehkvyx3lfanxi7ldzb7j4b.t.evil-cdn.test", "signal": "many_subdomains", "subdomains": 50}, "message": "10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s", "rule": "dns-tunnel", "severity": "medium", "src": "10.0.5.5", "ts": "2023-11-14T22:13:52.450000Z", "ts_ns": 1700000032450000000}
+{"detector": "dns_tunnel", "dst": null, "evidence": {"length": 124, "longest_label": 45, "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...", "signal": "long_name"}, "message": "10.0.5.6 asked for a very long name under example.org (124 characters)", "rule": "dns-tunnel", "severity": "medium", "src": "10.0.5.6", "ts": "2023-11-14T22:13:55.000000Z", "ts_ns": 1700000035000000000}
+{"detector": "dns_tunnel", "dst": "10.0.6.6", "evidence": {"answers": 20, "signal": "nxdomain"}, "message": "10.0.6.6 received 20 'no such name' answers in 0.9s", "rule": "dns-tunnel", "severity": "medium", "src": null, "ts": "2023-11-14T22:13:56.951000Z", "ts_ns": 1700000036951000000}
+"""
+
+ATTACK_ALERTS_TEXT = """\
+2023-11-14T22:13:20.140000Z [medium] port-scan: 10.9.9.1 probed 15 ports on 10.0.0.30 in 0.1s
+2023-11-14T22:13:23.700000Z [medium] port-scan: 10.9.9.2 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:24.700000Z [medium] port-scan: 10.9.9.3 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:25.700000Z [medium] port-scan: 10.9.9.4 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:29.160000Z [medium] port-scan: 10.9.9.5 probed port 22 on 30 hosts in 1.2s
+2023-11-14T22:13:32.099000Z [high] syn-flood: 100 SYNs to 10.0.0.2:80 in 0.1s from 100 sources, 20 completed
+2023-11-14T22:13:41.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:aa:00:00:00:01 to 02:ee:00:00:06:66
+2023-11-14T22:13:42.000000Z [high] arp-spoof: ARP says 10.0.0.1 is at 02:aa:00:00:00:01, but the frame came from 02:ee:00:00:06:66
+2023-11-14T22:13:42.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:ee:00:00:06:66 to 02:aa:00:00:00:01
+2023-11-14T22:13:50.000000Z [medium] dns-tunnel: 10.0.5.5 asked for a random-looking name under evil-cdn.test
+2023-11-14T22:13:52.450000Z [medium] dns-tunnel: 10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s
+2023-11-14T22:13:55.000000Z [medium] dns-tunnel: 10.0.5.6 asked for a very long name under example.org (124 characters)
+2023-11-14T22:13:56.951000Z [medium] dns-tunnel: 10.0.6.6 received 20 'no such name' answers in 0.9s
+"""
+
+
 @pytest.fixture
 def sample(tmp_path: Path) -> Path:
     path = tmp_path / "sample.pcap"
@@ -269,3 +302,98 @@ def test_flows_with_a_filter_only_sees_the_matching_packets(
     assert main(["flows", str(streams), "-f", "not tcp"]) == 0
     out = capsys.readouterr().out.splitlines(keepends=True)
     assert out == [lines[5], "# 1 flows, 2 packets in flows, 1 not in a flow" + "\n"]
+
+
+@pytest.fixture
+def attacks(tmp_path: Path) -> Path:
+    path = tmp_path / "attacks.pcap"
+    assert gen_pcap.main(["--attacks", str(path)]) == 0
+    return path
+
+
+@pytest.fixture
+def benign(tmp_path: Path) -> Path:
+    path = tmp_path / "benign.pcap"
+    assert gen_pcap.main(["--benign", str(path)]) == 0
+    return path
+
+
+def test_ids_prints_json_alerts_for_the_attacks(
+    attacks: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["ids", str(attacks)]) == 0
+    assert capsys.readouterr().out == ATTACK_ALERTS_JSON
+
+
+def test_ids_text_format(attacks: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["ids", str(attacks), "--format", "text"]) == 0
+    assert capsys.readouterr().out == ATTACK_ALERTS_TEXT
+
+
+def test_ids_is_quiet_on_harmless_traffic(
+    benign: Path, sample: Path, streams: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for path in (benign, sample, streams):
+        assert main(["ids", str(path)]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_rule_files_in_the_repository_give_the_default_output(
+    attacks: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rules = Path(__file__).resolve().parent.parent / "rules"
+    assert main(["ids", str(attacks), "--rules", str(rules)]) == 0
+    assert capsys.readouterr().out == ATTACK_ALERTS_JSON
+
+
+def test_ids_with_custom_rules(
+    attacks: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rules = tmp_path / "mine.toml"
+    rules.write_text(
+        '[[rule]]\nid = "only-arp"\ndetector = "arp_spoof"\nseverity = "critical"\n',
+        encoding="utf-8",
+    )
+    assert main(["ids", str(attacks), "--rules", str(rules), "--format", "text"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert all("[critical] only-arp:" in line for line in lines)
+
+
+def test_ids_reports_every_rule_problem_and_exits_with_2(
+    attacks: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rules = tmp_path / "bad.toml"
+    rules.write_text(
+        '[[rule]]\nid = "a"\ndetector = "nope"\n'
+        '[[rule]]\nid = "b"\ndetector = "port_scan"\nports = 1\n',
+        encoding="utf-8",
+    )
+    assert main(["ids", str(attacks), "--rules", str(rules)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0] == "sentinel: invalid rules:"
+    assert len(lines) == 3
+    assert "unknown detector 'nope'" in lines[1]
+    assert "unknown parameter 'ports'" in lines[2]
+
+
+def test_ids_with_a_missing_capture_or_rules_file(
+    attacks: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["ids", str(tmp_path / "nope.pcap")]) == 1
+    assert "nope.pcap" in capsys.readouterr().err
+    assert main(["ids", str(attacks), "--rules", str(tmp_path / "nope.toml")]) == 2
+    assert "invalid rules" in capsys.readouterr().err
+
+
+def test_ids_on_a_truncated_capture_prints_the_alerts_then_fails(
+    attacks: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    short = tmp_path / "short.pcap"
+    short.write_bytes(attacks.read_bytes()[:-3])
+    assert main(["ids", str(short)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ATTACK_ALERTS_JSON  # the cut packet came after every alert
+    assert "truncated pcap record" in captured.err

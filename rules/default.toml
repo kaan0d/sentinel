@@ -1,0 +1,46 @@
+# The rules `python -m sentinel ids` uses when --rules is not given.
+# `--rules rules/` loads every .toml file in this folder; copy and edit them to change thresholds.
+#
+# Common keys:  id (unique), detector, severity (low, medium, high, critical),
+#               enabled (true or false), filter (only packets that match are checked)
+# Everything else is a parameter of the detector.
+
+# One source probing many ports of one host, or one port of many hosts.
+# Counts TCP SYN scans and the stealth scans (no flags, FIN only, FIN+PSH+URG).
+[[rule]]
+id = "port-scan"
+detector = "port_scan"
+severity = "medium"
+distinct_ports = 15        # ports of one host within the window (0 turns this check off)
+distinct_hosts = 30        # hosts on one port within the window (0 turns this check off)
+window_seconds = 10.0
+
+# Many SYNs to one service, and few of them completed by the handshake's ACK.
+[[rule]]
+id = "syn-flood"
+detector = "syn_flood"
+severity = "high"
+syns = 100                 # SYNs to one address and port within the window
+window_seconds = 1.0
+max_completed_ratio = 0.3  # alert only if at most this share was completed
+
+# An IP address that moves to another MAC address, or an ARP packet whose sender does not
+# match the Ethernet source. Devices that are replaced or fail over also do the first.
+[[rule]]
+id = "arp-spoof"
+detector = "arp_spoof"
+severity = "high"
+check_ethernet_mismatch = true
+
+# Data hidden in DNS names, and clients asking for many names that do not exist.
+[[rule]]
+id = "dns-tunnel"
+detector = "dns_tunnel"
+severity = "medium"
+max_name_length = 100      # a name at least this long (0 turns each check off)
+max_label_length = 50
+entropy_threshold = 4.2    # bits per character, looked at for subdomains of 40 characters or more
+min_entropy_length = 40
+unique_subdomains = 50     # different subdomains of one domain within the window
+nxdomain_count = 20        # "no such name" answers to one client within the window
+window_seconds = 60.0

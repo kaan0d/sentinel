@@ -7,6 +7,8 @@ private or documentation ranges; nothing here comes from real traffic.
 """
 
 import argparse
+import base64
+import random
 import struct
 from collections.abc import Sequence
 from ipaddress import IPv4Address, IPv6Address
@@ -470,20 +472,245 @@ def generate_streams() -> list[Packet]:
     return _stamp(frames)
 
 
+def dns_response(ident: int, name: str, rcode: int = 0, qtype: int = 1) -> bytes:
+    """A response with the question and no answers. rcode 3 is NXDOMAIN, 'no such name'."""
+    header = struct.pack("!6H", ident, 0x8180 | rcode, 1, 0, 0, 0)
+    return header + dns_name(name) + struct.pack("!HH", qtype, 1)
+
+
+class Timeline:
+    """Frames with their times in seconds, written out in time order (ties keep their order)."""
+
+    def __init__(self) -> None:
+        self._items: list[tuple[int, int, bytes]] = []
+
+    def add(self, seconds: float, frame: bytes) -> None:
+        self._items.append((round(seconds * 1e9), len(self._items), frame))
+
+    def tcp(
+        self,
+        seconds: float,
+        src: IPv4Address,
+        sport: int,
+        dst: IPv4Address,
+        dport: int,
+        seq: int,
+        ack: int,
+        flags: int,
+        payload: bytes = b"",
+    ) -> None:
+        segment = tcp_segment(src, dst, sport, dport, seq, ack, flags, payload=payload)
+        self.add(
+            seconds, eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(src, dst, 6, segment))
+        )
+
+    def handshake(
+        self, seconds: float, client: IPv4Address, sport: int, server: IPv4Address, dport: int
+    ) -> None:
+        """SYN, SYN-ACK and the ACK that completes it, 1 ms apart."""
+        self.tcp(seconds, client, sport, server, dport, 1000, 0, tcp.SYN)
+        self.tcp(seconds + 0.001, server, dport, client, sport, 5000, 1001, tcp.SYN | tcp.ACK)
+        self.tcp(seconds + 0.002, client, sport, server, dport, 1001, 5001, tcp.ACK)
+
+    def dns(
+        self,
+        seconds: float,
+        client: IPv4Address,
+        resolver: IPv4Address,
+        ident: int,
+        name: str,
+        nxdomain: bool = False,
+    ) -> None:
+        query = udp_datagram(client, resolver, 50000 + ident % 1000, 53, dns_query(ident, name))
+        self.add(
+            seconds,
+            eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(client, resolver, 17, query)),
+        )
+        if nxdomain:
+            reply = dns_response(ident, name, rcode=3)
+            answer = udp_datagram(resolver, client, 53, 50000 + ident % 1000, reply)
+            self.add(
+                seconds + 0.001,
+                eth_frame(MAC_A, MAC_B, ETHERTYPE_IPV4, ipv4_packet(resolver, client, 17, answer)),
+            )
+
+    def arp(
+        self,
+        seconds: float,
+        op: int,
+        sha: bytes,
+        spa: str,
+        tha: bytes,
+        tpa: str,
+        eth_src: bytes | None = None,
+    ) -> None:
+        frame = arp_packet(op, sha, IPv4Address(spa), tha, IPv4Address(tpa))
+        dst = MAC_BROADCAST if op == 1 else tha
+        self.add(seconds, eth_frame(dst, eth_src or sha, ETHERTYPE_ARP, frame))
+
+    def packets(self) -> list[Packet]:
+        base_ns = 1_700_000_000 * 1_000_000_000
+        return [Packet(base_ns + ts, len(f), f) for ts, _, f in sorted(self._items)]
+
+
+GATEWAY_MAC = bytes.fromhex("02aa00000001")
+ATTACKER_MAC = bytes.fromhex("02ee00000666")
+
+
+def generate_benign() -> list[Packet]:
+    """Ordinary busy traffic that stays below every detector's threshold, some of it close: a
+    web server with 150 completed handshakes in one second, a client using 14 ports of one host,
+    lookups of 40 different subdomains, long readable names, a few 'no such name' answers, and
+    stable ARP. `ids` must raise no alert on it."""
+    t = Timeline()
+    web = IPv4Address("10.0.0.10")
+    for i in range(150):  # a busy server: every handshake completes
+        t.handshake(i * 0.0065, IPv4Address("10.0.1.0") + i + 1, 40000 + i, web, 80)
+    browser, site = IPv4Address("10.0.2.5"), IPv4Address("10.0.0.20")
+    for i, port in enumerate(
+        [80, 443, 8080, 8443, 3000, 5000, 8000, 8888, 9000, 9090, 22, 25, 587, 993]
+    ):
+        t.handshake(2.0 + i * 0.1, browser, 41000 + i, site, port)  # 14 ports, all completed
+    crawler = IPv4Address("10.0.2.6")
+    for i in range(25):  # 25 different servers on port 443, all completed
+        t.handshake(3.0 + i * 0.2, crawler, 42000 + i, IPv4Address("10.0.7.0") + i + 1, 443)
+    client, resolver = IPv4Address("10.0.3.3"), IPv4Address("10.0.0.53")
+    for i in range(40):
+        t.dns(4.0 + i * 0.1, client, resolver, 100 + i, f"cdn-{i}.example.net")
+    t.dns(
+        9.0,
+        client,
+        resolver,
+        200,
+        "reporting-service-internal-metrics-collector.eu-west.prod.example.org",
+    )
+    t.dns(9.1, client, resolver, 201, "mail-relay-outbound-03.datacenter-frankfurt.example.com")
+    for i in range(10):
+        t.dns(
+            10.0 + i * 0.1,
+            IPv4Address("10.0.3.4"),
+            resolver,
+            300 + i,
+            f"missing-{i}.example.org",
+            True,
+        )
+    for i in range(3):  # address probes, then the host announces itself, twice
+        t.arp(11.0 + i * 0.2, 1, MAC_A, "0.0.0.0", MAC_ZERO, "10.0.0.77")
+    t.arp(12.0, 2, GATEWAY_MAC, "10.0.0.1", MAC_A, "10.0.0.77")
+    t.arp(12.5, 1, MAC_A, "10.0.0.77", MAC_ZERO, "10.0.0.1")
+    t.arp(13.0, 2, GATEWAY_MAC, "10.0.0.1", MAC_A, "10.0.0.77")
+    t.arp(13.5, 2, MAC_A, "10.0.0.77", MAC_A, "10.0.0.77")
+    t.arp(14.0, 2, MAC_A, "10.0.0.77", MAC_A, "10.0.0.77")
+    for i in range(10):
+        echo = icmp_message(8, 0, 0x00030000 + i, b"ping" * 4)
+        t.add(15.0 + i, eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(browser, web, 1, echo)))
+    return t.packets()
+
+
+def generate_attacks() -> list[Packet]:
+    """One of each attack, from separate sources. With the default rules `ids` raises exactly
+    13 alerts: 3 stealth scans, a SYN scan, a host sweep, a SYN flood, 3 for ARP spoofing (the
+    gateway address moves to the attacker, a forged sender, and it moves back) and 4 for DNS
+    (random-looking name, many subdomains, a very long name, 'no such name' answers)."""
+    t = Timeline()
+    rng = random.Random(5)
+    target = IPv4Address("10.0.0.30")
+    for i in range(200):  # a SYN scan: 200 ports in 2 seconds; closed ports answer with a reset
+        t.tcp(i * 0.01, IPv4Address("10.9.9.1"), 50000, target, 1 + i, 7000, 0, tcp.SYN)
+        if i % 10:
+            t.tcp(
+                i * 0.01 + 0.001,
+                target,
+                1 + i,
+                IPv4Address("10.9.9.1"),
+                50000,
+                0,
+                7001,
+                tcp.RST | tcp.ACK,
+            )
+    for k, (scanner, flags) in enumerate(
+        [("10.9.9.2", 0), ("10.9.9.3", tcp.FIN), ("10.9.9.4", tcp.FIN | tcp.PSH | tcp.URG)]
+    ):  # stealth scans: null, FIN and Xmas
+        for i in range(20):
+            t.tcp(3.0 + k + i * 0.05, IPv4Address(scanner), 51000, target, 21 + i, 7000, 0, flags)
+    for i in range(40):  # a sweep: port 22 on 40 hosts
+        t.tcp(
+            8.0 + i * 0.04,
+            IPv4Address("10.9.9.5"),
+            52000,
+            IPv4Address("10.0.4.0") + i + 1,
+            22,
+            7000,
+            0,
+            tcp.SYN,
+        )
+    victim = IPv4Address("10.0.0.2")
+    for i in range(400):  # a SYN flood from spoofed sources; 20 of them finish the handshake
+        source = IPv4Address(rng.getrandbits(32) | 0x01000000)
+        t.tcp(12.0 + i * 0.001, source, 1024 + i, victim, 80, 9000, 0, tcp.SYN)
+        if i < 20:
+            t.tcp(12.0 + i * 0.001 + 0.004, source, 1024 + i, victim, 80, 9001, 5001, tcp.ACK)
+    t.arp(20.0, 2, GATEWAY_MAC, "10.0.0.1", MAC_A, "10.0.0.50")  # the real gateway
+    t.arp(
+        21.0, 2, ATTACKER_MAC, "10.0.0.1", MAC_A, "10.0.0.50"
+    )  # the attacker says it is the gateway
+    t.arp(
+        22.0, 2, GATEWAY_MAC, "10.0.0.1", MAC_A, "10.0.0.50", eth_src=ATTACKER_MAC
+    )  # a forged sender
+    tunnel, resolver = IPv4Address("10.0.5.5"), IPv4Address("10.0.0.53")
+    for i in range(80):  # data in DNS names: 80 different random-looking subdomains
+        label = base64.b32encode(rng.randbytes(30)).decode().lower().rstrip("=")
+        t.dns(30.0 + i * 0.05, tunnel, resolver, 400 + i, f"{label}.t.evil-cdn.test")
+    t.dns(
+        35.0,
+        IPv4Address("10.0.5.6"),
+        resolver,
+        500,
+        "a" * 45 + "." + "b" * 45 + "." + "c" * 20 + ".example.org",
+    )
+    for i in range(30):  # a client asking for names that do not exist
+        t.dns(
+            36.0 + i * 0.05,
+            IPv4Address("10.0.6.6"),
+            resolver,
+            600 + i,
+            f"x{rng.getrandbits(40):x}.example.com",
+            True,
+        )
+    return t.packets()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate a synthetic pcap covering every supported protocol"
     )
     parser.add_argument("output", type=Path, help="pcap file to write")
-    parser.add_argument(
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument(
         "--streams",
-        action="store_true",
+        action="store_const",
+        const=generate_streams,
+        dest="scenario",
         help="write the reassembly demo instead: reordered, repeated, split and lost segments",
+    )
+    which.add_argument(
+        "--benign",
+        action="store_const",
+        const=generate_benign,
+        dest="scenario",
+        help="write busy but harmless traffic, for checking that the detectors stay quiet",
+    )
+    which.add_argument(
+        "--attacks",
+        action="store_const",
+        const=generate_attacks,
+        dest="scenario",
+        help="write one of each attack the detectors look for",
     )
     args = parser.parse_args(argv)
     with args.output.open("wb") as fp:
         writer = PcapWriter(fp)
-        for packet in generate_streams() if args.streams else generate():
+        for packet in (args.scenario or generate)():
             writer.write(packet)
     return 0
 

@@ -12,7 +12,7 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 2 | DNS, plaintext HTTP, TLS ClientHello (SNI, versions, cipher list) | done |
 | 3 | Flow tracking, TCP stream reassembly, per-flow statistics, `flows` command | done |
 | 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`), `--filter` option | done |
-| 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts | planned |
+| 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts, `ids` command | done |
 | 6 | Live capture (Linux AF_PACKET) | planned |
 | 7 | Benchmarks, fuzz tests, CI | planned |
 
@@ -107,6 +107,32 @@ udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS quer
 # 6 flows, 31 packets in flows, 1 not in a flow
 ```
 
+Run the detectors over a capture and print alerts, one JSON object per line:
+
+```
+python tools/gen_pcap.py --attacks attacks.pcap
+python -m sentinel ids attacks.pcap --format text
+python -m sentinel ids attacks.pcap --rules rules/
+```
+
+```
+2023-11-14T22:13:20.140000Z [medium] port-scan: 10.9.9.1 probed 15 ports on 10.0.0.30 in 0.1s
+2023-11-14T22:13:23.700000Z [medium] port-scan: 10.9.9.2 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:24.700000Z [medium] port-scan: 10.9.9.3 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:25.700000Z [medium] port-scan: 10.9.9.4 probed 15 ports on 10.0.0.30 in 0.7s
+2023-11-14T22:13:29.160000Z [medium] port-scan: 10.9.9.5 probed port 22 on 30 hosts in 1.2s
+2023-11-14T22:13:32.099000Z [high] syn-flood: 100 SYNs to 10.0.0.2:80 in 0.1s from 100 sources, 20 completed
+2023-11-14T22:13:41.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:aa:00:00:00:01 to 02:ee:00:00:06:66
+2023-11-14T22:13:42.000000Z [high] arp-spoof: ARP says 10.0.0.1 is at 02:aa:00:00:00:01, but the frame came from 02:ee:00:00:06:66
+2023-11-14T22:13:42.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:ee:00:00:06:66 to 02:aa:00:00:00:01
+2023-11-14T22:13:50.000000Z [medium] dns-tunnel: 10.0.5.5 asked for a random-looking name under evil-cdn.test
+2023-11-14T22:13:52.450000Z [medium] dns-tunnel: 10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s
+2023-11-14T22:13:55.000000Z [medium] dns-tunnel: 10.0.5.6 asked for a very long name under example.org (124 characters)
+2023-11-14T22:13:56.951000Z [medium] dns-tunnel: 10.0.6.6 received 20 'no such name' answers in 0.9s
+```
+
+The same capture with `--format json` (the default) gives one object per alert with the fields `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence`. `python tools/gen_pcap.py --benign benign.pcap` writes busy but harmless traffic, and `ids` prints nothing for it.
+
 ## Stage 1: pcap I/O and L2-L4 parsers
 
 **pcap.** Classic pcap, read and written in both byte orders and both time units (microsecond and nanosecond magic numbers). Timestamps are kept as integer nanoseconds, so a write-then-read round trip is exact. The reader streams from the file and rejects records with a captured length above 262,144 bytes. A corrupt record raises `PcapError` only after all earlier packets have been yielded.
@@ -184,6 +210,45 @@ A protocol followed by a qualifier is an implicit `and`: `tcp port 80` is `tcp a
 
 **Tests.** 331 tests in total. The evaluator is compared with hand-written predicates for 34 primitives over an 80-packet corpus (both demo captures, fragments, cut headers, stacked VLAN tags, garbage), and 400 random `and`/`or`/`not` combinations are compared with Python's own logic. The parser is tested with exact trees, 31 error messages and positions, random trees that must print and parse back to the same tree, and thousands of random texts that must never raise. A sabotage run now breaks 59 lines across stages 1 to 4 on purpose, and every break is caught by at least one test.
 
+## Stage 5: IDS engine
+
+`python -m sentinel ids capture.pcap [--rules PATH] [--format json|text]` runs the detectors over a capture, in capture order, and prints an alert for each finding. Detectors work on packets and only see intact layers. Alerts are sorted by the time of the packet that raised them, then by the rule's position, so the same capture and rules always give the same output.
+
+**Detectors.**
+
+| Detector | Looks for | Default | Expect false positives from |
+|----------|-----------|---------|-----------------------------|
+| `port_scan` | one source probing many ports of one host, or one port of many hosts; TCP SYN and the stealth scans (no flags, FIN only, FIN+PSH+URG) count | 15 ports or 30 hosts within 10 s | vulnerability scanners you run yourself |
+| `syn_flood` | many SYNs to one address and port, few completed by the handshake's ACK | 100 SYNs within 1 s, at most 30% completed | a burst of connections to a server that then stops answering |
+| `arp_spoof` | an IP address that moves to another MAC address; an ARP sender MAC that differs from the Ethernet source; address probes from 0.0.0.0 are ignored | any change | a replaced network card, a failover pair |
+| `dns_tunnel` | a name of 100+ characters or a label of 50+; a random-looking subdomain (4.2 bits per character, 40+ characters); 50 different subdomains of one domain in 60 s; 20 "no such name" answers to one client in 60 s | as listed | long generated names of some CDNs and security products |
+
+Entropy alone does not separate tunnels from readable names: base32 and base64 subdomains land mostly above 4.2 bits per character, hex-encoded ones stay below it, and long readable hostnames reach about 4.1. The three other DNS signals exist for that reason.
+
+**Rules.** TOML files, read with the standard library. `--rules` takes a file or a directory (every `*.toml`, in name order); without it the built-in defaults are used, and `rules/default.toml` spells them out (a test keeps the two equal).
+
+```toml
+[[rule]]
+id = "ssh-scan"              # required, unique: a-z, 0-9, '-' and '_'
+detector = "port_scan"       # required
+severity = "high"            # optional: low, medium, high or critical
+enabled = true               # optional
+filter = "dst port 22"       # optional: the detector only sees packets that match (stage 4 language)
+distinct_hosts = 5           # the rest are the detector's own parameters
+distinct_ports = 0           # 0 turns a check off
+window_seconds = 30
+```
+
+Loading never raises. Every problem in every file is reported at once, with the file and rule number, and the command exits with 2. Parameters are typed and range-checked, and an unknown key is an error, so a typo cannot silently keep a default. Several rules may use the same detector.
+
+**Alerts.** One JSON object per line with sorted keys and ASCII only: `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence` (the numbers behind the alert). `--format text` prints `time [severity] rule: message`. One attack gives one alert per source, target and window, not one per packet.
+
+**Exit codes.** 0 when the capture was read, with or without alerts; 1 when the capture is unreadable or corrupt (the alerts raised before the corrupt record are still printed); 2 for bad rules.
+
+**Limits.** Every detector keeps bounded state (100,000 keys, capped sliding windows, oldest half-open handshakes dropped first). When a limit forces a packet to be ignored, the run ends with a low-severity alert that says how many.
+
+**Tests.** 441 tests in total. `tools/gen_pcap.py --benign` writes 647 packets kept just below every threshold (150 completed handshakes in one second, 14 ports of one host, 25 hosts on one port, 40 subdomains, long readable names, repeated ARP announcements): it must raise no alert. `--attacks` writes one of each attack and must raise exactly 13 alerts, listed one by one in the tests. Every detector is tested one below its threshold, at it, at the window edge and switched off, and the engine is fuzzed with random frames, truncations, corruptions and scrambled timestamps.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -195,6 +260,7 @@ A protocol followed by a qualifier is an implicit `and`: `tcp port 80` is `tcp a
 - ARP: Ethernet/IPv4 only. Only link type Ethernet is read.
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
+- IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
 - Printed timestamps have microsecond precision.
 - Only tested on Python 3.13, and only on synthetic traffic.
 
@@ -205,6 +271,8 @@ sentinel/pcap/     pcap reader and writer
 sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http, tls) and decode()
 sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
 sentinel/filter/   filter language: lexer, parser, evaluator
+sentinel/ids/      IDS engine: detectors, sliding window, rule loading, alerts
+rules/             default.toml, one rule per detector
 sentinel/summary.py  tcpdump-style line formatting
 sentinel/cli.py    command line entry point
 tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writer)
