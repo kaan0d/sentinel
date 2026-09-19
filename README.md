@@ -4,7 +4,7 @@
 
 Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
 
-Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean.
+Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. The rows for stages 9 to 12 are the plan, and it can change.
 
 ## Status
 
@@ -17,6 +17,11 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts, `ids` command | done |
 | 6 | Live capture (Linux AF_PACKET), `live` command | done |
 | 7 | Benchmarks, fuzzer, CI | done |
+| 8 | pcapng reader: Wireshark's default file format, for `read`, `flows` and `ids` | done |
+| 9 | Compare with `tshark` on public sample captures, and fix every difference | next |
+| 10 | Two more detectors: SSH brute force, ICMP tunneling | planned |
+| 11 | TLS fingerprint (JA3) from the ClientHello | planned |
+| 12 | Live capture on Windows, IP level only, if it turns out to be reliable | maybe |
 
 ## Install
 
@@ -28,10 +33,11 @@ pip install -e ".[dev]"
 
 ## Usage
 
-Print one tcpdump-style line per packet:
+Print one tcpdump-style line per packet. The file can be classic pcap or pcapng (Wireshark's default); the format is picked from the first bytes of the file, not from its name:
 
 ```
 python -m sentinel read capture.pcap
+python -m sentinel read capture.pcapng
 ```
 
 Generate a small synthetic capture that covers every supported protocol, then read it:
@@ -40,6 +46,8 @@ Generate a small synthetic capture that covers every supported protocol, then re
 python tools/gen_pcap.py demo.pcap
 python -m sentinel read demo.pcap
 ```
+
+`python tools/gen_pcap.py --pcapng demo.pcapng` writes the same packets as pcapng, and `read`, `flows` and `ids` give the same output for both.
 
 ```
 2023-11-14 22:13:20.000000 ARP, Request who-has 10.0.0.2 tell 10.0.0.1, length 28
@@ -149,10 +157,10 @@ The first prints the same lines as `read`, as the packets arrive. The last runs 
 
 | What | Result |
 |------|--------|
-| Tests | 620 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
+| Tests | 727 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
 | CI | GitHub Actions, 5 jobs green: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests as root on an Ubuntu runner (a real packet socket on the loopback interface) |
-| Sabotage | 196 deliberate one-line breaks of the code, every one caught by the tests |
-| Fuzzing | 3,000,000 damaged packets and capture files through the whole pipeline (seed 7): 0 failures |
+| Sabotage | 253 deliberate one-line breaks of the code, every one caught by the tests |
+| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 8): 0 failures |
 | Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
 | Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
 
@@ -334,6 +342,20 @@ Reading the table:
 
 **Tests.** 626 in total (620 run here; 6 need Linux and root). The benchmark: the corpus is the four captures in order with each capture starting one second after the last ended, repeats keep the time moving forward, the timer keeps the fastest run, a stage that handles the wrong number of packets is an error, the flushed writer really is flushed (the file on disk is checked before each packet), the live stages print nothing and restore the command. The fuzzer: every damage checked against its definition (including brute force over every possible slice), the same seed giving the same run, every kind of failure detected with a substituted component that misbehaves (an exception, a summary with a control character, a filter that does not answer, an alert that is not JSON, a flow line with a line break, a pcap reader that raises something other than `PcapError`), and every option.
 
+## Stage 8: pcapng
+
+**Why.** Wireshark has saved pcapng by default for years, and the reader only knew classic pcap, so most captures a user makes today were refused (`not a pcap file: bad magic 0a0d0d0a`). Now `read`, `flows` and `ids` take either format. `open_reader` picks the reader from the first four bytes: a pcapng file starts with the section header `0a 0d 0d 0a`, which is the same in both byte orders and none of the classic magic numbers. The file name does not matter.
+
+**Reader.** `sentinel/pcap/pcapng.py`, 183 lines, standard library only. Blocks are type, length, body, length again. It reads section headers, interface descriptions, enhanced packet blocks and simple packet blocks, and skips every other block by its length (name resolution, interface statistics, decryption secrets, custom blocks). The byte order is per section, from the byte-order magic, and a new section forgets the interfaces of the old one. Timestamps become integer nanoseconds like the classic reader's, from each interface's `if_tsresol` (powers of 10 or of 2, microseconds by default) and `if_tsoffset`, with integers only: a nanosecond timestamp of today needs 61 bits and a float keeps 53. A timestamp before 1970 or after the year 9999 is refused, because the summary line could not print it. A simple packet block has no timestamp, so it takes the time of the packet before it. The link type of the file is the first interface's, and a packet on an interface with another link type is an error, not something decoded as Ethernet by mistake.
+
+**Bad files.** Like the classic reader it raises `PcapError` only, after yielding the packets before the damage. It refuses a block length that is under 12 (28 for a section header), not a multiple of 4, or over 16 MiB, a length that is not repeated at the end of the block, a block cut short, a version other than 1, a packet for an interface that was not described, a captured length over 262,144 or past the end of the block, an interface option of the wrong size or one that runs past its block, and an out-of-range timestamp.
+
+**Checked against.** My tests build their files block by block from the format description, not with my generator. As a separate check, an independent implementation, `python-pcapng` 2.1.1 (installed in a scratch folder, not a dependency and not part of the tests), wrote files that this reader read, and read files that `tools/gen_pcap.py --pcapng` wrote: 12 combinations of byte order and timestamp resolution (66 packets) one way and 2,190 packets the other way, all equal to the nanosecond. I had no file written by Wireshark itself, so that is still unchecked.
+
+**Fuzzing.** The fuzzer now makes half of its capture files pcapng, and splices files of the two formats together. A run of 3,000,000 inputs (seed 8: 2,400,000 packets and 600,000 capture files, half of them pcapng) found nothing. As in stage 7, that is a result about these inputs and these checks, not a proof.
+
+**Tests.** 727 run here (107 new, 84 of them in `tests/test_pcapng.py`), and 6 need Linux and root. Every resolution, both byte orders, several sections and interfaces, skipped blocks, simple blocks, every refusal with its message, both ends of the timestamp range (the last accepted second must be printable, the next must not be), every prefix of a valid file in both byte orders and every byte replaced in turn (the reader may only raise `PcapError`, and a cut at a block boundary must be a prefix of the real packets), and `read`, `flows` and `ids` giving the same output for the pcap and the pcapng version of each of the four generated captures. Sabotage: 57 new one-line breaks (253 in all), every one caught. Three of them made the first run hang instead of fail; the cause was pytest building a diff of two 647-line outputs after a failed comparison, not the code, and the test now reports the first different line instead.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -343,6 +365,7 @@ Reading the table:
 - `read` still works one segment at a time, so it can misread what `flows` gets right: a DNS-over-TCP message split across segments is skipped, and a segment from the middle of a stream that starts with a method name such as `GET ` is read as HTTP.
 - Filters: no host names, no `ether host`, `len`, byte offsets or TCP flag words. `dns`, `http` and `tls` match per packet (a segment that starts a message), not per connection. `flows --filter` filters packets, not whole flows.
 - ARP: Ethernet/IPv4 only. Only link type Ethernet is read.
+- pcapng: name resolution and interface statistics blocks, comments and packet flags are skipped, and compressed files (`.pcapng.gz`) are not opened. A simple packet block has no timestamp, so a file of only those has every time at 0. Only the generator writes pcapng; `live --write` still saves classic pcap. No file written by Wireshark itself was available to test against.
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
 - IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
@@ -355,7 +378,7 @@ Reading the table:
 ## Project layout
 
 ```
-sentinel/pcap/     pcap reader and writer
+sentinel/pcap/     pcap and pcapng readers, pcap writer
 sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http, tls) and decode()
 sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
 sentinel/filter/   filter language: lexer, parser, evaluator

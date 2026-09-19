@@ -8,7 +8,7 @@ from sentinel.flow import FlowTable
 from sentinel.flow.report import format_flow, format_footer
 from sentinel.ids import Alert, Engine, RuleSet, default_rules, load_rules, to_json, to_text
 from sentinel.live import LiveError, open_capture
-from sentinel.pcap import LINKTYPE_ETHERNET, Packet, PcapError, PcapReader, PcapWriter
+from sentinel.pcap import LINKTYPE_ETHERNET, Packet, PcapError, PcapWriter, open_reader
 from sentinel.proto.decode import decode
 from sentinel.summary import summarize
 
@@ -16,7 +16,7 @@ from sentinel.summary import summarize
 def _packets(path: Path) -> Iterator[Packet]:
     """The packets of a capture. Raises PcapError after the good packets if the file is corrupt."""
     with path.open("rb") as fp:
-        reader = PcapReader(fp)
+        reader = open_reader(fp)
         if reader.linktype != LINKTYPE_ETHERNET:
             raise PcapError(f"unsupported link type {reader.linktype} (Ethernet only)")
         yield from reader
@@ -191,7 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     live.add_argument("--rules", type=Path, metavar="PATH", help="rules for --ids (see ids)")
     live.add_argument("--format", choices=("json", "text"), help="alert format for --ids")
     for command in (read, flows):
-        command.add_argument("file", type=Path, help="classic pcap file")
+        command.add_argument("file", type=Path, help="pcap or pcapng file")
     for command in (read, flows, live):
         command.add_argument(
             "--filter",
@@ -200,7 +200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             help='only packets that match, e.g. "tcp and port 80 and not src host 10.0.0.1"',
         )
     ids = commands.add_parser("ids", help="run the detectors over a capture and print alerts")
-    ids.add_argument("file", type=Path, help="classic pcap file")
+    ids.add_argument("file", type=Path, help="pcap or pcapng file")
     ids.add_argument(
         "--rules",
         type=Path,

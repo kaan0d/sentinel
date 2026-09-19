@@ -397,3 +397,125 @@ def test_ids_on_a_truncated_capture_prints_the_alerts_then_fails(
     captured = capsys.readouterr()
     assert captured.out == ATTACK_ALERTS_JSON  # the cut packet came after every alert
     assert "truncated pcap record" in captured.err
+
+
+# ---- pcapng: every command gives the same output as for the same packets in a classic file ----
+
+SCENARIOS = [
+    pytest.param([], id="sample"),
+    pytest.param(["--streams"], id="streams"),
+    pytest.param(["--benign"], id="benign"),
+    pytest.param(["--attacks"], id="attacks"),
+]
+
+
+def both_formats(tmp_path: Path, scenario: list[str]) -> tuple[Path, Path]:
+    classic, ng = tmp_path / "x.pcap", tmp_path / "x.pcapng"
+    assert gen_pcap.main([*scenario, str(classic)]) == 0
+    assert gen_pcap.main([*scenario, "--pcapng", str(ng)]) == 0
+    return classic, ng
+
+
+@pytest.mark.parametrize("command", ["read", "flows", "ids"])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_pcapng_file_gives_the_same_output_as_a_classic_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str, scenario: list[str]
+) -> None:
+    classic, ng = both_formats(tmp_path, scenario)
+    assert main([command, str(classic)]) == 0
+    expected = capsys.readouterr().out
+    if command != "ids" or scenario == ["--attacks"]:
+        assert expected  # the quiet captures raise no alerts, which is fine
+    assert main([command, str(ng)]) == 0
+    got = capsys.readouterr().out
+    # Not `got == expected` in the assert: when two long texts differ, pytest spends minutes
+    # building a diff of them.
+    same = got == expected
+    assert same, f"first different line: {first_difference(got, expected)}"
+
+
+def first_difference(a: str, b: str) -> int:
+    a_lines, b_lines = a.splitlines(), b.splitlines()
+    pairs = zip(a_lines, b_lines, strict=False)
+    return next((i for i, (x, y) in enumerate(pairs) if x != y), min(len(a_lines), len(b_lines)))
+
+
+def test_the_pcapng_golden_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ng = both_formats(tmp_path, [])[1]
+    assert main(["read", str(ng)]) == 0
+    assert capsys.readouterr().out == GOLDEN
+    assert main(["flows", str(ng)]) == 0
+    assert capsys.readouterr().out == SAMPLE_FLOWS
+
+
+def test_the_filter_works_on_a_pcapng_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ng = both_formats(tmp_path, [])[1]
+    assert main(["read", str(ng), "-f", "arp"]) == 0
+    assert capsys.readouterr().out == golden_lines(0, 1)
+
+
+def test_the_pcapng_generator_is_deterministic(tmp_path: Path) -> None:
+    a, b = tmp_path / "a.pcapng", tmp_path / "b.pcapng"
+    gen_pcap.main(["--pcapng", str(a)])
+    gen_pcap.main(["--pcapng", str(b)])
+    assert a.read_bytes() == b.read_bytes()
+    assert a.read_bytes()[:4] == bytes([0x0A, 0x0D, 0x0D, 0x0A])
+
+
+def test_pcapng_through_the_module_entry_point(tmp_path: Path) -> None:
+    ng = both_formats(tmp_path, [])[1]
+    done = subprocess.run(
+        [sys.executable, "-m", "sentinel", "read", str(ng)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert done.stdout == GOLDEN
+
+
+def test_the_file_extension_does_not_matter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    classic, ng = both_formats(tmp_path, [])
+    named_pcap, named_pcapng = tmp_path / "a.pcap", tmp_path / "b.pcapng"
+    named_pcap.write_bytes(ng.read_bytes())
+    named_pcapng.write_bytes(classic.read_bytes())
+    for path in (named_pcap, named_pcapng):
+        assert main(["read", str(path)]) == 0
+        assert capsys.readouterr().out == GOLDEN
+
+
+def test_pcapng_with_an_unsupported_link_type(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "raw.pcapng"
+    path.write_bytes(gen_pcap.pcapng_bytes([Packet(1, 3, b"abc")], linktype=101))
+    assert main(["read", str(path)]) == 1
+    assert "link type 101" in capsys.readouterr().err
+
+
+def test_a_truncated_pcapng_prints_the_packets_before_the_cut_then_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ng = both_formats(tmp_path, [])[1]
+    short = tmp_path / "short.pcapng"
+    short.write_bytes(ng.read_bytes()[:-3])
+    assert main(["read", str(short)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == GOLDEN.rsplit("\n", 2)[0] + "\n"
+    assert "truncated pcapng block" in captured.err
+    assert main(["flows", str(short)]) == 1
+    assert "truncated pcapng block" in capsys.readouterr().err
+    assert main(["ids", str(short)]) == 1
+    assert "truncated pcapng block" in capsys.readouterr().err
+
+
+def test_a_damaged_pcapng_start_is_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "bad.pcapng"
+    path.write_bytes(bytes([0x0A, 0x0D, 0x0D, 0x0A]) + bytes(30))
+    assert main(["read", str(path)]) == 1
+    assert "bad.pcapng" in capsys.readouterr().err

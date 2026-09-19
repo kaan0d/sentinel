@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from ipaddress import IPv4Address, IPv6Address
 from itertools import pairwise
 from pathlib import Path
+from typing import Literal
 
 from sentinel.pcap import Packet, PcapWriter
 from sentinel.proto import tcp
@@ -680,11 +681,44 @@ def generate_attacks() -> list[Packet]:
     return t.packets()
 
 
+def pcapng_block(kind: int, body: bytes, order: str = "<") -> bytes:
+    """One pcapng block: type, length, body padded to four bytes, length again."""
+    body += bytes(-len(body) % 4)
+    total = len(body) + 12
+    return struct.pack(order + "II", kind, total) + body + struct.pack(order + "I", total)
+
+
+def pcapng_bytes(
+    packets: Sequence[Packet],
+    *,
+    byteorder: Literal["little", "big"] = "little",
+    tsresol: int = 9,
+    linktype: int = 1,
+) -> bytes:
+    """A pcapng file with one section, one interface and one enhanced packet block per packet.
+    Timestamps are written in units of 10**-tsresol seconds (9 is nanoseconds, 6 microseconds)."""
+    order = "<" if byteorder == "little" else ">"
+    shb = pcapng_block(0x0A0D0D0A, struct.pack(order + "IHHq", 0x1A2B3C4D, 1, 0, -1), order)
+    options = struct.pack(order + "HHB3x", 9, 1, tsresol) + struct.pack(order + "HH", 0, 0)
+    idb = pcapng_block(1, struct.pack(order + "HHI", linktype, 0, 262144) + options, order)
+    blocks = [shb, idb]
+    for packet in packets:
+        ticks = packet.ts_ns * 10**tsresol // 10**9
+        head = struct.pack(
+            order + "IIIII", 0, ticks >> 32, ticks & 0xFFFFFFFF, len(packet.data), packet.orig_len
+        )
+        blocks.append(pcapng_block(6, head + packet.data, order))
+    return b"".join(blocks)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate a synthetic pcap covering every supported protocol"
     )
     parser.add_argument("output", type=Path, help="pcap file to write")
+    parser.add_argument(
+        "--pcapng", action="store_true", help="write pcapng instead of classic pcap"
+    )
     which = parser.add_mutually_exclusive_group()
     which.add_argument(
         "--streams",
@@ -708,10 +742,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="write one of each attack the detectors look for",
     )
     args = parser.parse_args(argv)
+    packets = (args.scenario or generate)()
     with args.output.open("wb") as fp:
-        writer = PcapWriter(fp)
-        for packet in (args.scenario or generate)():
-            writer.write(packet)
+        if args.pcapng:
+            fp.write(pcapng_bytes(packets))
+        else:
+            writer = PcapWriter(fp)
+            for packet in packets:
+                writer.write(packet)
     return 0
 
 

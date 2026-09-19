@@ -26,10 +26,16 @@ from sentinel.filter import parse_filter
 from sentinel.flow import FlowTable
 from sentinel.flow.report import format_flow
 from sentinel.ids import Engine, default_rules, to_json
-from sentinel.pcap import Packet, PcapError, PcapReader, PcapWriter
+from sentinel.pcap import Packet, PcapError, PcapWriter, open_reader
 from sentinel.proto.decode import decode
 from sentinel.summary import summarize
-from tools.gen_pcap import generate, generate_attacks, generate_benign, generate_streams
+from tools.gen_pcap import (
+    generate,
+    generate_attacks,
+    generate_benign,
+    generate_streams,
+    pcapng_bytes,
+)
 
 DEFAULT_SEED = 1
 DEFAULT_ITERATIONS = 100_000
@@ -200,18 +206,23 @@ class Pipeline:
         return None
 
 
-def _capture_file(rng: random.Random, pool: list[bytes]) -> bytes:
-    buf = io.BytesIO()
-    writer = PcapWriter(buf)
+def _capture_file(rng: random.Random, pool: list[bytes], pcapng: bool) -> bytes:
+    packets = []
     for i in range(rng.randrange(1, 6)):
         data = rng.choice(pool)
-        writer.write(Packet(1_700_000_000_000_000_000 + i, len(data), data))
+        packets.append(Packet(1_700_000_000_000_000_000 + i, len(data), data))
+    if pcapng:
+        return pcapng_bytes(packets)
+    buf = io.BytesIO()
+    writer = PcapWriter(buf)
+    for packet in packets:
+        writer.write(packet)
     return buf.getvalue()
 
 
 def _read_file(data: bytes, pipeline: Pipeline) -> str | None:
     try:
-        for packet in PcapReader(io.BytesIO(data)):
+        for packet in open_reader(io.BytesIO(data)):
             problem = pipeline.packet(packet)
             if problem:
                 return problem
@@ -230,7 +241,10 @@ def run(seed: int, iterations: int) -> Report:
     for i in range(iterations):
         if i % FILE_EVERY == FILE_EVERY - 1:
             files += 1
-            data = mutate(rng, _capture_file(rng, pool), _capture_file(rng, pool))
+            # Both formats, and now and then one of each spliced together.
+            first = _capture_file(rng, pool, files % 2 == 0)
+            second = _capture_file(rng, pool, files // 2 % 2 == 0)
+            data = mutate(rng, first, second)
             kind, check = "capture file", _read_file
         else:
             data = mutate(rng, rng.choice(pool), rng.choice(pool))

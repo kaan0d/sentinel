@@ -5,7 +5,7 @@ from itertools import product
 import pytest
 
 from sentinel.ids import Alert
-from sentinel.pcap import Packet, PcapError, PcapReader, PcapWriter
+from sentinel.pcap import Packet, PcapError, PcapngReader, PcapReader, PcapWriter, open_reader
 from sentinel.proto.decode import decode
 from tools import fuzz
 from tools.gen_pcap import generate, generate_attacks
@@ -316,7 +316,7 @@ def test_a_bad_capture_file_may_only_raise_pcap_error(monkeypatch: pytest.Monkey
         def __next__(self) -> Packet:
             raise ValueError("not a PcapError")
 
-    monkeypatch.setattr(fuzz, "PcapReader", Bad)
+    monkeypatch.setattr(fuzz, "open_reader", Bad)
     with pytest.raises(ValueError, match="not a PcapError"):
         fuzz._read_file(b"", pipeline)
 
@@ -324,7 +324,7 @@ def test_a_bad_capture_file_may_only_raise_pcap_error(monkeypatch: pytest.Monkey
         def __next__(self) -> Packet:
             raise PcapError("bad file")
 
-    monkeypatch.setattr(fuzz, "PcapReader", Denied)
+    monkeypatch.setattr(fuzz, "open_reader", Denied)
     assert fuzz._read_file(b"", pipeline) is None
 
 
@@ -425,3 +425,41 @@ def test_alert_is_the_type_the_pipeline_checks() -> None:
         Alert(1, "r", "port_scan", "low", None, None, "m"),
         Alert,
     )
+
+
+def test_capture_files_are_made_in_both_formats() -> None:
+    rng = random.Random(1)
+    pool = fuzz.seeds()
+    classic = fuzz._capture_file(rng, pool, False)
+    ng = fuzz._capture_file(rng, pool, True)
+    assert isinstance(open_reader(io.BytesIO(classic)), PcapReader)
+    assert isinstance(open_reader(io.BytesIO(ng)), PcapngReader)
+    assert 1 <= len(list(open_reader(io.BytesIO(classic)))) <= 5
+    assert 1 <= len(list(open_reader(io.BytesIO(ng)))) <= 5
+
+
+def test_a_run_uses_both_formats_for_both_halves_of_a_spliced_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wanted: list[bool] = []
+    real = fuzz._capture_file
+
+    def spy(rng: random.Random, pool: list[bytes], pcapng: bool) -> bytes:
+        wanted.append(pcapng)
+        return real(rng, pool, pcapng)
+
+    monkeypatch.setattr(fuzz, "_capture_file", spy)
+    fuzz.run(1, 200)  # 40 capture files, two halves each
+    firsts, seconds = wanted[0::2], wanted[1::2]
+    assert firsts.count(True) == firsts.count(False) == 20
+    assert seconds.count(True) == seconds.count(False) == 20
+    assert set(zip(firsts, seconds, strict=True)) == {
+        (a, b) for a in (True, False) for b in (True, False)
+    }
+
+
+def test_pcapng_capture_files_go_through_the_pipeline() -> None:
+    pipeline = valid_line_pipeline()
+    ng = fuzz._capture_file(random.Random(2), fuzz.seeds(), True)
+    assert fuzz._read_file(ng, pipeline) is None
+    assert fuzz._read_file(ng[:-1], pipeline) is None  # the cut file only raises PcapError
