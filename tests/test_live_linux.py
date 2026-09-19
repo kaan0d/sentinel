@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from sentinel.live import LiveError, open_capture
+from sentinel.live import capture as live_capture
 from sentinel.proto.decode import decode
 from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.udp import Udp
@@ -101,5 +102,26 @@ def test_a_datagram_on_loopback_is_seen_exactly_once() -> None:
             if udp is not None and udp.payload == marker:
                 seen += 1
         assert seen == 1
+    finally:
+        capture.close()
+
+
+@needs_root
+def test_without_the_filter_a_loopback_datagram_is_seen_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This is what the filter exists for: with it switched off, the two copies the kernel gives a
+    # packet socket (leaving and arriving) both come out.
+    monkeypatch.setattr(live_capture, "_second_copy", lambda address: False)
+    capture = open_capture("lo")
+    try:
+        marker = b"sentinel-twice-" + os.urandom(8).hex().encode()
+        send_udp(marker, 40447)
+        seen = 0
+        for packet in capture.packets(1.5):
+            udp = next((layer for layer in decode(packet.data) if isinstance(layer, Udp)), None)
+            if udp is not None and udp.payload == marker:
+                seen += 1
+        assert seen == 2
     finally:
         capture.close()
