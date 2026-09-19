@@ -408,7 +408,8 @@ def test_the_capture_ends_after_the_duration(
     code, out, err = run(capsys, "--duration", "0.05")
     assert (code, out, err) == (0, "", "# 0 packets\n")
     assert sock.timeouts
-    assert all(t is not None and 0 < t <= 0.05 for t in sock.timeouts)
+    # never more than the time limit (plus what a float loses when the clock reading is large)
+    assert all(t is not None and 0 < t <= 0.05 + 1e-6 for t in sock.timeouts)
 
 
 def random_frames(seed: int, n: int) -> list[Packet]:
