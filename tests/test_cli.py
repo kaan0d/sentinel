@@ -208,3 +208,64 @@ def test_flows_on_a_missing_or_bad_file(tmp_path: Path, capsys: pytest.CaptureFi
     junk.write_bytes(b"this is not a capture file at all")
     assert main(["flows", str(junk)]) == 1
     assert "bad magic" in capsys.readouterr().err
+
+
+def golden_lines(*indexes: int) -> str:
+    lines = GOLDEN.splitlines(keepends=True)
+    return "".join(lines[i] for i in indexes)
+
+
+def test_read_with_a_filter_prints_only_matching_packets(
+    sample: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    flt = "tcp and (port 80 or port 443) and not src host 10.0.0.1"
+    assert main(["read", str(sample), "--filter", flt]) == 0
+    assert capsys.readouterr().out == golden_lines(6, 12, 17)
+    assert main(["read", str(sample), "-f", "arp"]) == 0
+    assert capsys.readouterr().out == golden_lines(0, 1)
+    assert main(["read", str(sample), "-f", "vlan 100"]) == 0
+    assert capsys.readouterr().out == golden_lines(11)
+
+
+def test_read_with_a_filter_that_matches_nothing(
+    sample: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["read", str(sample), "-f", "tcp and udp"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_a_bad_filter_is_reported_with_a_caret_and_exit_code_2(
+    sample: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["read", str(sample), "-f", "tcp and port http"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "sentinel: invalid filter: expected a port number (0-65535), got 'http'",
+        "  tcp and port http",
+        "  " + " " * 13 + "^",
+    ]
+    assert main(["flows", str(sample), "-f", ""]) == 2
+    assert "empty filter" in capsys.readouterr().err
+
+
+def test_the_filter_is_checked_before_the_file_is_opened(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["read", str(tmp_path / "nope.pcap"), "-f", "bogus"]) == 2
+    assert "unknown filter word 'bogus'" in capsys.readouterr().err
+
+
+def test_flows_with_a_filter_only_sees_the_matching_packets(
+    streams: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = STREAM_FLOWS.splitlines(keepends=True)
+    assert main(["flows", str(streams), "-f", "port 53"]) == 0
+    out = capsys.readouterr().out.splitlines(keepends=True)
+    assert out[:-1] == [lines[2], lines[5]]
+    assert out[-1] == "# 2 flows, 7 packets in flows, 0 not in a flow" + "\n"
+    assert main(["flows", str(streams), "-f", "tcp and port 8080"]) == 0
+    assert capsys.readouterr().out.splitlines(keepends=True)[0] == lines[0]
+    assert main(["flows", str(streams), "-f", "not tcp"]) == 0
+    out = capsys.readouterr().out.splitlines(keepends=True)
+    assert out == [lines[5], "# 1 flows, 2 packets in flows, 1 not in a flow" + "\n"]

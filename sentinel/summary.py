@@ -196,5 +196,7 @@ def describe(layers: Sequence[Layer], wire_len: int) -> str:
     return _body(layers, wire_len) + "".join(f" [{n}]" for n in notes)
 
 
-def summarize(packet: Packet) -> str:
-    return f"{_timestamp(packet.ts_ns)} {describe(decode(packet.data), packet.orig_len)}"
+def summarize(packet: Packet, layers: Sequence[Layer] | None = None) -> str:
+    """The line for one packet. Pass `layers` if the packet was already decoded."""
+    layers = decode(packet.data) if layers is None else layers
+    return f"{_timestamp(packet.ts_ns)} {describe(layers, packet.orig_len)}"

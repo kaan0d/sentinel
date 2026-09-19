@@ -11,7 +11,7 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 1 | pcap reader/writer, Ethernet, ARP, IPv4, IPv6, TCP, UDP, ICMP parsers, `read` command | done |
 | 2 | DNS, plaintext HTTP, TLS ClientHello (SNI, versions, cipher list) | done |
 | 3 | Flow tracking, TCP stream reassembly, per-flow statistics, `flows` command | done |
-| 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`) | planned |
+| 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`), `--filter` option | done |
 | 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts | planned |
 | 6 | Live capture (Linux AF_PACKET) | planned |
 | 7 | Benchmarks, fuzz tests, CI | planned |
@@ -62,6 +62,27 @@ python -m sentinel read demo.pcap
 ```
 
 Timestamps are UTC with microsecond precision, so the output does not depend on the machine's time zone. Anomalies and errors are appended to a line as `[...]`, for example `[bad ipv4 header checksum]`.
+
+Only the packets that match a filter (see the filter language below):
+
+```
+python -m sentinel read demo.pcap --filter "tcp and (port 80 or port 443) and not src host 10.0.0.1"
+```
+
+```
+2023-11-14 22:13:20.006000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [S.], seq 5000, ack 1001, win 64240, options [mss 1460,sackOK,TS val 1000 ecr 0,nop,wscale 7], length 0
+2023-11-14 22:13:20.012000 IP6 2001:db8::1.41000 > 2001:db8::2.443: Flags [S], seq 1, win 65535, length 0
+2023-11-14 22:13:20.017000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [P.], seq 5001, ack 1039, win 64240, length 77: HTTP: HTTP/1.1 200 OK
+```
+
+A filter that does not parse is reported with a caret under the problem, and the exit code is 2:
+
+```
+$ python -m sentinel read demo.pcap -f "tcp and port http"
+sentinel: invalid filter: expected a port number (0-65535), got 'http'
+  tcp and port http
+               ^
+```
 
 Group packets into flows, reassemble the TCP streams and print one line of statistics per flow:
 
@@ -138,6 +159,31 @@ udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS quer
 
 **Tests.** 226 tests in total. A property test cuts 300 random payloads into overlapping, duplicated pieces, shuffles them, places the SYN anywhere (including last) and starts sequence numbers near the 32-bit wrap; the stream must equal the payload. The same check runs through `FlowTable` with real packets. A sabotage run now breaks 33 lines across stages 1 to 3 on purpose, and every break is caught by at least one test. While writing these tests a stage 2 bug turned up (an empty line reported as a malformed HTTP header when a segment ended at a line break); it is fixed.
 
+## Stage 4: filter language
+
+`--filter EXPR` (or `-f`) works on both `read` and `flows`. It selects packets before anything else, so `flows` builds its flows from the matching packets only. Keeping whole conversations works with endpoint filters (`host`, `port`, `tcp`). A filter that drops some packets of a connection (for example `http`) leaves a partial flow, and reassembly reports the missing bytes.
+
+**Language.**
+
+| Word | Matches |
+|------|---------|
+| `ip`, `ip6`, `arp`, `tcp`, `udp`, `icmp` | packets that have that layer |
+| `dns`, `http`, `tls` | packets with that application layer (TLS means a ClientHello) |
+| `vlan`, `vlan 100` | any VLAN tag, or a tag with that id (any tag of a stacked pair) |
+| `host 10.0.0.1`, `host 2001:db8::1` | that address as source or destination (also ARP sender and target) |
+| `net 10.0.0.0/8` | an address inside that network |
+| `port 80`, `portrange 5000-6000` | TCP or UDP port |
+| `src ...`, `dst ...` before `host`, `net`, `port` or `portrange` | only that side |
+| `not`, `!` / `and`, `&&` / `or`, `||`, `( )` | combine; `not` binds tighter than `and`, which binds tighter than `or` |
+
+A protocol followed by a qualifier is an implicit `and`: `tcp port 80` is `tcp and port 80`. Keywords are case-insensitive. Host names are not looked up; use addresses.
+
+**Errors are values.** `parse_filter(text)` never raises. It returns a `Filter` whose `error` and `position` say what is wrong and where, and `Filter.matches(layers)` is false for a filter with an error. The limits: nesting of 100 levels, 1,000 tokens, numbers of up to 10 digits, so a hostile or accidental filter cannot exhaust the parser.
+
+**Meaning, in detail.** A protocol word is true when that layer is present, even if it has an error (a broken TCP header is still a TCP packet). `host`, `net` and `port` need an intact header, so an errored layer never matches (its default zeros do not match `port 0` or `host 0.0.0.0`). IPv4 and IPv6 never match each other's networks. IP fragments are not decoded past the IP header, so they match `ip` and `host` but not `tcp` or `port`.
+
+**Tests.** 331 tests in total. The evaluator is compared with hand-written predicates for 34 primitives over an 80-packet corpus (both demo captures, fragments, cut headers, stacked VLAN tags, garbage), and 400 random `and`/`or`/`not` combinations are compared with Python's own logic. The parser is tested with exact trees, 31 error messages and positions, random trees that must print and parse back to the same tree, and thousands of random texts that must never raise. A sabotage run now breaks 59 lines across stages 1 to 4 on purpose, and every break is caught by at least one test.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -145,6 +191,7 @@ udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS quer
 - Reassembly is offline: `data()` is read when the capture is done, not delivered as it arrives. Streams are limited to their first 1 MiB. Overlap handling is first-copy-wins; other operating systems may resolve overlaps differently.
 - Flows: TCP and UDP only, VLAN tags are not part of a flow's identity, and a flow idle longer than the timeout is split in two.
 - `read` still works one segment at a time, so it can misread what `flows` gets right: a DNS-over-TCP message split across segments is skipped, and a segment from the middle of a stream that starts with a method name such as `GET ` is read as HTTP.
+- Filters: no host names, no `ether host`, `len`, byte offsets or TCP flag words. `dns`, `http` and `tls` match per packet (a segment that starts a message), not per connection. `flows --filter` filters packets, not whole flows.
 - ARP: Ethernet/IPv4 only. Only link type Ethernet is read.
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
@@ -157,6 +204,7 @@ udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS quer
 sentinel/pcap/     pcap reader and writer
 sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http, tls) and decode()
 sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
+sentinel/filter/   filter language: lexer, parser, evaluator
 sentinel/summary.py  tcpdump-style line formatting
 sentinel/cli.py    command line entry point
 tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writer)

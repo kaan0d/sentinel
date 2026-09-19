@@ -6,6 +6,7 @@ FIN or RST, or a SYN with a different initial sequence number) or after it sat i
 ICMP, ARP, IP fragments and packets that failed to parse are not flows; they are only counted.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
 
@@ -17,6 +18,7 @@ from sentinel.proto.decode import decode
 from sentinel.proto.dns import Dns
 from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.ipv6 import IPv6
+from sentinel.proto.layer import Layer
 from sentinel.proto.tcp import Tcp
 from sentinel.proto.udp import Udp
 
@@ -191,8 +193,9 @@ class FlowTable:
         self.skipped_packets = 0  # not TCP/UDP, a fragment, or unparsable
         self.untracked_packets = 0  # packets that would start a flow beyond `max_flows`
 
-    def add(self, packet: Packet) -> None:
-        layers = decode(packet.data)
+    def add(self, packet: Packet, layers: Sequence[Layer] | None = None) -> None:
+        """Add a packet. Pass `layers` if the packet was already decoded."""
+        layers = decode(packet.data) if layers is None else layers
         ip = layers[1] if len(layers) > 1 else None
         l4 = layers[2] if len(layers) > 2 else None
         if not isinstance(ip, IPv4 | IPv6) or ip.error or not isinstance(l4, Tcp | Udp) or l4.error:
