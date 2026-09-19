@@ -123,7 +123,7 @@ def _tls(t: TlsClientHello) -> str:
     return ", ".join(parts)
 
 
-def _app(app: Layer) -> str:
+def describe_app(app: Layer) -> str:
     if isinstance(app, Dns):
         return _dns(app)
     if isinstance(app, Http):
@@ -168,7 +168,7 @@ def _ip(ip: IPv4 | IPv6, l4: Layer | None, app: Layer | None) -> str:
         return head + _icmp(l4)
     text = _tcp(l4) if isinstance(l4, Tcp) else f"UDP, length {len(l4.payload)}"
     if app is not None and not app.error:
-        text += ": " + _app(app)
+        text += ": " + describe_app(app)
     return head + text
 
 

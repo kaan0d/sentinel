@@ -49,6 +49,12 @@ def test_headers_cut_off_by_the_segment_are_an_anomaly() -> None:
     assert http.payload == b""
 
 
+def test_a_segment_ending_exactly_at_a_line_break_has_no_malformed_line() -> None:
+    http = parse_http(b"GET / HTTP/1.1\r\nHost: a\r\n")
+    assert http.headers == (("Host", "a"),)
+    assert http.anomalies == ("http headers incomplete: no blank line in this segment",)
+
+
 def test_every_truncation_never_raises() -> None:
     for message in (REQUEST, RESPONSE):
         for n in range(len(message) + 1):

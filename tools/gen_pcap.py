@@ -10,6 +10,7 @@ import argparse
 import struct
 from collections.abc import Sequence
 from ipaddress import IPv4Address, IPv6Address
+from itertools import pairwise
 from pathlib import Path
 
 from sentinel.pcap import Packet, PcapWriter
@@ -293,7 +294,7 @@ def generate() -> list[Packet]:
             MAC_B,
             MAC_A,
             ETHERTYPE_IPV4,
-            ip(IP_A, IP_B, 6, tcp_segment(IP_A, IP_B, 40000, 80, 1041, 5001, tcp.FIN | tcp.ACK)),
+            ip(IP_A, IP_B, 6, tcp_segment(IP_A, IP_B, 40000, 80, 1039, 5001, tcp.FIN | tcp.ACK)),
         ),
         eth_frame(
             MAC_B,
@@ -361,7 +362,7 @@ def generate() -> list[Packet]:
                 IP_A,
                 6,
                 tcp_segment(
-                    IP_B, IP_A, 80, 40000, 5001, 1041, tcp.PSH | tcp.ACK, payload=HTTP_RESPONSE
+                    IP_B, IP_A, 80, 40000, 5001, 1039, tcp.PSH | tcp.ACK, payload=HTTP_RESPONSE
                 ),
             ),
         ),
@@ -377,8 +378,96 @@ def generate() -> list[Packet]:
             ),
         ),
     ]
+    return _stamp(frames)
+
+
+def _stamp(frames: list[bytes]) -> list[Packet]:
     base_ns = 1_700_000_000 * 1_000_000_000  # 2023-11-14 22:13:20 UTC
     return [Packet(base_ns + i * 1_000_000, len(f), f) for i, f in enumerate(frames)]
+
+
+class Conversation:
+    """The frames of one TCP connection between 10.0.0.1 (client) and 10.0.0.2 (server)."""
+
+    def __init__(self, frames: list[bytes], sport: int, dport: int) -> None:
+        self.frames = frames
+        self.sport = sport
+        self.dport = dport
+
+    def client(self, seq: int, ack: int, flags: int, payload: bytes = b"") -> None:
+        seg = tcp_segment(IP_A, IP_B, self.sport, self.dport, seq, ack, flags, payload=payload)
+        self.frames.append(eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(IP_A, IP_B, 6, seg)))
+
+    def server(self, seq: int, ack: int, flags: int, payload: bytes = b"") -> None:
+        seg = tcp_segment(IP_B, IP_A, self.dport, self.sport, seq, ack, flags, payload=payload)
+        self.frames.append(eth_frame(MAC_A, MAC_B, ETHERTYPE_IPV4, ipv4_packet(IP_B, IP_A, 6, seg)))
+
+    def handshake(self, client_isn: int, server_isn: int) -> None:
+        self.client(client_isn, 0, tcp.SYN)
+        self.server(server_isn, client_isn + 1, tcp.SYN | tcp.ACK)
+        self.client(client_isn + 1, server_isn + 1, tcp.ACK)
+
+
+def generate_streams() -> list[Packet]:
+    """Connections that need reassembly: out-of-order and repeated segments, messages split
+    across segments, a lost segment, a reset, plus one UDP exchange and one ICMP echo."""
+    frames: list[bytes] = []
+    psh_ack = tcp.PSH | tcp.ACK
+    fin_ack = tcp.FIN | tcp.ACK
+
+    # A. HTTP POST split into three segments that arrive out of order, one of them twice. The
+    # body holds text that looks like a request line: it starts the last segment on purpose.
+    a = Conversation(frames, 44000, 8080)
+    a.handshake(7000, 9000)
+    body = b"GET /inside-the-body HTTP/1.1\r\n\r\n"
+    head = b"POST /upload HTTP/1.1\r\nHost: files.test\r\nContent-Length: %d\r\n\r\n" % len(body)
+    request = head + body
+    cuts = [0, 30, len(head), len(request)]
+    parts = [(7001 + lo, request[lo:hi]) for lo, hi in pairwise(cuts)]
+    for seq, chunk in (parts[1], parts[0], parts[2], parts[1]):
+        a.client(seq, 9001, psh_ack, chunk)
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    c_end, s_end = 7001 + len(request), 9001 + len(response)
+    a.server(9001, c_end, psh_ack, response)
+    a.client(c_end, s_end, fin_ack)
+    a.server(s_end, c_end + 1, fin_ack)
+    a.client(c_end + 1, s_end + 1, tcp.ACK)
+
+    # B. A TLS ClientHello split in two; the second half arrives first.
+    b = Conversation(frames, 45000, 8443)
+    b.handshake(12000, 13000)
+    b.client(12001 + 90, 13001, psh_ack, CLIENT_HELLO[90:])
+    b.client(12001, 13001, psh_ack, CLIENT_HELLO[:90])
+
+    # C. Two DNS queries back to back on one TCP connection, the first split across segments.
+    c = Conversation(frames, 46000, 53)
+    c.handshake(20000, 21000)
+    q1, q2 = dns_query(1, "example.com"), dns_query(2, "www.example.com", 28)
+    stream = len(q1).to_bytes(2) + q1 + len(q2).to_bytes(2) + q2
+    c.client(20001, 21001, psh_ack, stream[:20])
+    c.client(20001 + 20, 21001, psh_ack, stream[20:])
+
+    # D. A segment lost in the capture: 100 bytes never arrive.
+    d = Conversation(frames, 47000, 80)
+    d.handshake(30000, 31000)
+    d.client(30001, 31001, psh_ack, b"first part. " * 8 + b"....")  # 100 bytes
+    d.client(30201, 31001, psh_ack, b"third part. " * 5)  # 60 bytes
+    d.client(30261, 31001, fin_ack)
+
+    # E. A refused connection.
+    e = Conversation(frames, 48000, 22)
+    e.client(40000, 0, tcp.SYN)
+    e.server(0, 40001, tcp.RST | tcp.ACK)
+
+    # F. A UDP exchange, and G. an ICMP echo, which is not a flow.
+    ip = ipv4_packet
+    query = udp_datagram(IP_A, IP_B, 53004, 53, dns_query(0x1234, "www.example.com"))
+    answer = udp_datagram(IP_B, IP_A, 53, 53004, dns_cname_response())
+    frames.append(eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ip(IP_A, IP_B, 17, query)))
+    frames.append(eth_frame(MAC_A, MAC_B, ETHERTYPE_IPV4, ip(IP_B, IP_A, 17, answer)))
+    echo = icmp_message(8, 0, 0x00020001, b"ping" * 8)
+    frames.append(eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ip(IP_A, IP_B, 1, echo)))
+    return _stamp(frames)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -386,10 +475,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Generate a synthetic pcap covering every supported protocol"
     )
     parser.add_argument("output", type=Path, help="pcap file to write")
+    parser.add_argument(
+        "--streams",
+        action="store_true",
+        help="write the reassembly demo instead: reordered, repeated, split and lost segments",
+    )
     args = parser.parse_args(argv)
     with args.output.open("wb") as fp:
         writer = PcapWriter(fp)
-        for packet in generate():
+        for packet in generate_streams() if args.streams else generate():
             writer.write(packet)
     return 0
 

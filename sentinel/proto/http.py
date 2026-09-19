@@ -71,6 +71,8 @@ def parse_http(data: bytes) -> Http:
         anomalies.append("http headers incomplete: no blank line in this segment")
     headers: list[tuple[str, str]] = []
     for line in lines[1:]:
+        if not line:  # the segment ended exactly at a line break
+            continue
         if len(headers) >= _MAX_HEADERS:
             anomalies.append(f"more than {_MAX_HEADERS} http headers")
             break
