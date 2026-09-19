@@ -1,12 +1,20 @@
 import json
 import random
+from ipaddress import IPv4Address
 
 import pytest
 
 from sentinel.ids import Alert, Engine, default_rules, parse_rules, to_json
 from sentinel.pcap import Packet
+from sentinel.proto import tcp
 from sentinel.proto.decode import decode
-from tools.gen_pcap import generate, generate_attacks, generate_benign, generate_streams
+from tools.gen_pcap import (
+    Timeline,
+    generate,
+    generate_attacks,
+    generate_benign,
+    generate_streams,
+)
 
 
 def run(packets: list[Packet], rules_toml: str | None = None) -> list[Alert]:
@@ -191,3 +199,54 @@ def test_scrambled_timestamps_do_not_break_the_detectors() -> None:
     packets = generate_attacks()
     shuffled = [Packet(rng.randrange(10**12), p.orig_len, p.data) for p in packets]
     run(shuffled)  # the alerts do not matter, only that nothing raises
+
+
+def test_popped_alerts_are_the_same_alerts_given_one_at_a_time() -> None:
+    engine = Engine(default_rules().rules)
+    popped: list[Alert] = []
+    for packet in generate_attacks():
+        engine.process(packet)
+        popped += engine.pop_alerts()
+    assert engine.pop_alerts() == []  # nothing is given twice
+    assert engine.finish() == []
+    assert popped == run(generate_attacks())
+
+
+def test_alerts_from_one_packet_come_out_in_detector_order() -> None:
+    engine = Engine(default_rules().rules)
+    packets = generate_attacks()
+    for packet in packets[:902]:
+        engine.process(packet)
+        engine.pop_alerts()
+    engine.process(packets[902])
+    assert [a.message[:13] for a in engine.pop_alerts()] == ["ARP says 10.0", "10.0.0.1 move"]
+
+
+def test_popped_alerts_are_sorted_by_time_then_by_rule() -> None:
+    both = """
+[[rule]]
+id = "second"
+detector = "port_scan"
+[[rule]]
+id = "first"
+detector = "port_scan"
+"""
+
+    def scan(source: str, start: float) -> list[Packet]:
+        t = Timeline()
+        for i in range(15):
+            src, dst = IPv4Address(source), IPv4Address("10.0.0.30")
+            t.tcp(start + i * 0.01, src, 50000, dst, 1 + i, 7000, 0, tcp.SYN)
+        return t.packets()
+
+    later, earlier = scan("10.9.9.1", 100), scan("10.9.9.2", 0)
+    rules = parse_rules(both, "test")
+    engine = Engine(rules.rules)
+    for packet in later + earlier:  # the later scan is seen first
+        engine.process(packet)
+    assert [(a.rule, a.src) for a in engine.pop_alerts()] == [
+        ("second", "10.9.9.2"),
+        ("first", "10.9.9.2"),
+        ("second", "10.9.9.1"),
+        ("first", "10.9.9.1"),
+    ]

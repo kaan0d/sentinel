@@ -1,5 +1,6 @@
 import base64
 import random
+from collections import OrderedDict
 from ipaddress import IPv4Address
 
 import pytest
@@ -8,11 +9,14 @@ from sentinel.ids.detectors import (
     DETECTORS,
     Detection,
     Detector,
+    DnsTunnel,
+    PortScan,
     SynFlood,
     entropy,
     is_scan_probe,
 )
 from sentinel.ids.view import make_view
+from sentinel.ids.window import SlidingWindow
 from sentinel.pcap import Packet
 from sentinel.proto import tcp
 from sentinel.proto.decode import decode
@@ -177,7 +181,88 @@ def test_state_limits_are_reported_not_fatal(monkeypatch: pytest.MonkeyPatch) ->
     for i in range(10):  # ten different sources: only three can be followed
         t.tcp(i * 0.01, IPv4Address("10.9.9.0") + i + 1, 50000, TARGET, 80, 7000, 0, tcp.SYN)
     feed(detector, t.packets())
-    assert detector.dropped > 0
+    assert detector.dropped == 7  # seven packets, though two tables refused each one
+
+
+def shifted(packets: list[Packet], seconds: float) -> list[Packet]:
+    offset = int(seconds * 1_000_000_000)
+    return [Packet(p.ts_ns + offset, p.orig_len, p.data) for p in packets]
+
+
+def scan_from(index: int, seconds: float) -> list[Packet]:
+    """One SYN to port 80 from 10.9.9.<index>, at `seconds`."""
+    t = Timeline()
+    t.tcp(seconds, IPv4Address("10.9.9.0") + index, 50000, TARGET, 80, 7000, 0, tcp.SYN)
+    return t.packets()
+
+
+def test_sources_that_went_quiet_are_forgotten(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A capture that runs for days meets far more sources than the table holds. Only the recent
+    # ones matter, so the table must not fill up and stop watching new sources.
+    monkeypatch.setattr("sentinel.ids.detectors.MAX_KEYS", 3)
+    detector = sample("port_scan")  # a 10 second window
+    for i in range(1, 11):  # ten sources, 30 seconds apart
+        feed(detector, scan_from(i, i * 30.0))
+    assert detector.dropped == 0
+    assert isinstance(detector, PortScan)
+    assert (len(detector._by_target), len(detector._by_port)) == (1, 1)
+    assert len(feed(detector, shifted(probes(15), 400.0))) == 1  # and it still sees a scan
+
+
+def test_a_source_is_forgotten_only_after_the_whole_window_has_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sentinel.ids.detectors.MAX_KEYS", 1)
+    detector = sample("port_scan")
+    feed(detector, scan_from(1, 0.0))
+    feed(detector, scan_from(2, 10.0))  # exactly one window later: the first is still counted
+    assert detector.dropped == 1
+    feed(detector, scan_from(3, 10.000001))  # now it is older than the window
+    assert detector.dropped == 1
+    assert isinstance(detector, PortScan)
+    assert list(detector._by_target) == [("10.9.9.3", str(TARGET))]
+
+
+def test_a_source_that_keeps_sending_is_not_the_one_forgotten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sentinel.ids.detectors.MAX_KEYS", 2)
+    detector = sample("port_scan")
+    feed(detector, scan_from(1, 0.0))
+    feed(detector, scan_from(2, 6.0))
+    feed(detector, scan_from(1, 12.0))  # source 1 is active again; source 2 is the idle one
+    feed(detector, scan_from(3, 17.0))
+    assert detector.dropped == 0
+    assert isinstance(detector, PortScan)
+    assert sorted(detector._by_target) == [
+        ("10.9.9.1", str(TARGET)),
+        ("10.9.9.3", str(TARGET)),
+    ]
+
+
+def test_quiet_targets_of_a_syn_flood_and_clients_of_dns_are_forgotten_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sentinel.ids.detectors.MAX_KEYS", 2)
+    flood_detector = sample("syn_flood")  # a 1 second window
+    for i in range(8):  # eight services, each with a completed handshake, 5 seconds apart
+        t = Timeline()
+        src, dst = IPv4Address("10.20.0.1"), IPv4Address("10.0.0.2")
+        t.tcp(i * 5.0, src, 1024, dst, 8000 + i, 9000, 0, tcp.SYN)
+        t.tcp(i * 5.0 + 0.1, src, 1024, dst, 8000 + i, 9001, 9001, tcp.ACK)
+        feed(flood_detector, t.packets())
+    assert flood_detector.dropped == 0
+    assert isinstance(flood_detector, SynFlood)
+    assert (len(flood_detector._syns), len(flood_detector._done)) == (1, 1)
+
+    dns = sample("dns_tunnel")  # a 60 second window
+    for i in range(8):  # eight clients, 200 seconds apart, each asking and each getting NXDOMAIN
+        client = IPv4Address("10.0.3.0") + i + 1
+        feed(dns, shifted(queries(["a.example.net"], client=client), i * 200.0))
+        feed(dns, shifted(nxdomains(1, str(client)), i * 200.0))
+    assert dns.dropped == 0
+    assert isinstance(dns, DnsTunnel)
+    assert (len(dns._subdomains), len(dns._nxdomains)) == (1, 1)
 
 
 # ---- syn flood ------------------------------------------------------------------------------
@@ -515,3 +600,10 @@ def test_every_detector_ignores_packets_that_are_not_theirs() -> None:
     for name in ("port_scan", "syn_flood", "arp_spoof", "dns_tunnel"):
         detector = sample(name)
         assert feed(detector, [Packet(i, len(f), f) for i, f in enumerate(frames)]) == []
+
+
+def test_a_window_with_no_events_is_forgotten_too() -> None:
+    detector = sample("port_scan")
+    table: OrderedDict[str, SlidingWindow] = OrderedDict(idle=SlidingWindow(10, 5))
+    detector._table_window(table, "new", 10, 5, 100)
+    assert list(table) == ["new"]

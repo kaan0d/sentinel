@@ -79,3 +79,11 @@ def test_alert_formats() -> None:
         '"severity": "medium", "src": "10.0.0.1", "ts": "2023-11-14T22:13:20.123456Z", '
         '"ts_ns": 1700000000123456789}'
     )
+
+
+def test_the_newest_event_time() -> None:
+    w = SlidingWindow(10 * SEC, 100)
+    assert w.newest_ns is None
+    w.add(3 * SEC, "a")
+    w.add(7 * SEC, "b")
+    assert w.newest_ns == 7 * SEC

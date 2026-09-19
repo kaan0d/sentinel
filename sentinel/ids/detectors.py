@@ -5,6 +5,7 @@ ignore packets because of it. A detector never raises on a packet: it only sees 
 (see PacketView)."""
 
 import math
+from collections import OrderedDict
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
@@ -61,14 +62,29 @@ class Detector:
         return True
 
     def _table_window[K: Hashable](
-        self, table: dict[K, SlidingWindow], key: K, window_ns: int, max_events: int
+        self,
+        table: OrderedDict[K, SlidingWindow],
+        key: K,
+        window_ns: int,
+        max_events: int,
+        ts_ns: int,
     ) -> SlidingWindow | None:
+        """The window of `key`, made if needed. The table is kept in order of last use, and a
+        key that has been idle for longer than the window is forgotten (its window would be
+        empty anyway), so a long run does not fill the table with sources that are long gone."""
         window = table.get(key)
-        if window is None:
-            if len(table) >= MAX_KEYS:
-                self.dropped += 1
-                return None
-            window = table[key] = SlidingWindow(window_ns, max_events)
+        if window is not None:
+            table.move_to_end(key)
+            return window
+        while table:
+            oldest = table[next(iter(table))].newest_ns
+            if oldest is not None and ts_ns - oldest <= window_ns:
+                break
+            table.popitem(last=False)
+        if len(table) >= MAX_KEYS:
+            self.dropped += 1
+            return None
+        window = table[key] = SlidingWindow(window_ns, max_events)
         return window
 
 
@@ -108,16 +124,17 @@ class PortScan(Detector):
         self._ports_needed = int(config["distinct_ports"])
         self._hosts_needed = int(config["distinct_hosts"])
         self._window = _window_ns(config)
-        self._by_target: dict[tuple[str, str], SlidingWindow] = {}
-        self._by_port: dict[tuple[str, int], SlidingWindow] = {}
+        self._by_target: OrderedDict[tuple[str, str], SlidingWindow] = OrderedDict()
+        self._by_port: OrderedDict[tuple[str, int], SlidingWindow] = OrderedDict()
 
     def on_packet(self, view: PacketView) -> list[Detection]:
         tcp, src, dst = view.tcp, view.src_ip, view.dst_ip
         if tcp is None or src is None or dst is None or not is_scan_probe(tcp.flags):
             return []
         s, d, out = str(src), str(dst), []
+        dropped_before = self.dropped
         if self._ports_needed:
-            w = self._window_for(self._by_target, (s, d), self._ports_needed)
+            w = self._window_for(self._by_target, (s, d), self._ports_needed, view.ts_ns)
             if w is not None:
                 w.add(view.ts_ns, tcp.dst_port)
                 if w.distinct >= self._ports_needed and self._first(
@@ -137,7 +154,7 @@ class PortScan(Detector):
                         )
                     )
         if self._hosts_needed:
-            w = self._window_for(self._by_port, (s, tcp.dst_port), self._hosts_needed)
+            w = self._window_for(self._by_port, (s, tcp.dst_port), self._hosts_needed, view.ts_ns)
             if w is not None:
                 w.add(view.ts_ns, d)
                 key = ("hosts", s, tcp.dst_port)
@@ -156,13 +173,15 @@ class PortScan(Detector):
                             },
                         )
                     )
+        if self.dropped - dropped_before > 1:  # one packet, however many tables refused it
+            self.dropped = dropped_before + 1
         return out
 
     def _window_for[K: Hashable](
-        self, table: dict[K, SlidingWindow], key: K, needed: int
+        self, table: OrderedDict[K, SlidingWindow], key: K, needed: int, ts_ns: int
     ) -> SlidingWindow | None:
         # Enough room to see `needed` different keys, whatever repeats in between.
-        return self._table_window(table, key, self._window, max(needed * 4, 64))
+        return self._table_window(table, key, self._window, max(needed * 4, 64), ts_ns)
 
 
 class SynFlood(Detector):
@@ -181,8 +200,8 @@ class SynFlood(Detector):
         self._needed = int(config["syns"])
         self._max_ratio = float(config["max_completed_ratio"])
         self._window = _window_ns(config)
-        self._syns: dict[tuple[str, int], SlidingWindow] = {}
-        self._done: dict[tuple[str, int], SlidingWindow] = {}
+        self._syns: OrderedDict[tuple[str, int], SlidingWindow] = OrderedDict()
+        self._done: OrderedDict[tuple[str, int], SlidingWindow] = OrderedDict()
         self._pending: dict[tuple[str, int, str, int], None] = {}  # connections awaiting the ACK
 
     def on_packet(self, view: PacketView) -> list[Detection]:
@@ -193,7 +212,7 @@ class SynFlood(Detector):
         target = (d, tcp.dst_port)
         conn = (s, tcp.src_port, d, tcp.dst_port)
         if tcp.flags & tcpflags.SYN and not tcp.flags & tcpflags.ACK:
-            w = self._table_window(self._syns, target, self._window, self._needed + 1)
+            w = self._table_window(self._syns, target, self._window, self._needed + 1, view.ts_ns)
             if w is None:
                 return []
             w.add(view.ts_ns, s)
@@ -227,7 +246,9 @@ class SynFlood(Detector):
         elif tcp.flags & tcpflags.ACK and not tcp.flags & (tcpflags.SYN | tcpflags.RST):
             if conn in self._pending:  # the third packet of a handshake
                 del self._pending[conn]
-                done_window = self._table_window(self._done, target, self._window, self._needed + 1)
+                done_window = self._table_window(
+                    self._done, target, self._window, self._needed + 1, view.ts_ns
+                )
                 if done_window is not None:
                     done_window.add(view.ts_ns)
         return []
@@ -342,8 +363,8 @@ class DnsTunnel(Detector):
         self._unique = int(config["unique_subdomains"])
         self._nx = int(config["nxdomain_count"])
         self._window = _window_ns(config)
-        self._subdomains: dict[tuple[str, str], SlidingWindow] = {}
-        self._nxdomains: dict[str, SlidingWindow] = {}
+        self._subdomains: OrderedDict[tuple[str, str], SlidingWindow] = OrderedDict()
+        self._nxdomains: OrderedDict[str, SlidingWindow] = OrderedDict()
 
     def on_packet(self, view: PacketView) -> list[Detection]:
         dns = view.dns
@@ -390,7 +411,7 @@ class DnsTunnel(Detector):
             )
         if self._unique and sub:
             w = self._table_window(
-                self._subdomains, (client, base), self._window, self._unique * 2 + 1
+                self._subdomains, (client, base), self._window, self._unique * 2 + 1, ts_ns
             )
             if w is not None:
                 w.add(ts_ns, sub)
@@ -408,7 +429,7 @@ class DnsTunnel(Detector):
         if dst is None:
             return []
         client = str(dst)
-        w = self._table_window(self._nxdomains, client, self._window, self._nx + 1)
+        w = self._table_window(self._nxdomains, client, self._window, self._nx + 1, view.ts_ns)
         if w is None:
             return []
         w.add(view.ts_ns)

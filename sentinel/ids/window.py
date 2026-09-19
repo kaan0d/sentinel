@@ -48,6 +48,11 @@ class SlidingWindow:
         return list(self._counts)
 
     @property
+    def newest_ns(self) -> int | None:
+        """Timestamp of the newest event, or None when the window is empty."""
+        return self._events[-1][0] if self._events else None
+
+    @property
     def span_ns(self) -> int:
         """Time from the oldest to the newest event in the window."""
         return self._events[-1][0] - self._events[0][0] if self._events else 0

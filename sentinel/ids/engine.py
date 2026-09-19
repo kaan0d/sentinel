@@ -50,6 +50,15 @@ class Engine:
             )
             self._alerts.append((position, alert))
 
+    def pop_alerts(self) -> list[Alert]:
+        """The alerts raised since the last call, in the usual order, removed from the engine.
+        A live run calls this after every packet, so alerts are printed as they happen and the
+        engine does not keep them all until the end."""
+        self._alerts.sort(key=lambda item: (item[1].ts_ns, item[0]))
+        alerts = [alert for _, alert in self._alerts]
+        self._alerts = []
+        return alerts
+
     def finish(self) -> list[Alert]:
         for position, active in enumerate(self._active):
             self._collect(position, active, active.detector.finish())

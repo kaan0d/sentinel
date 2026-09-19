@@ -13,7 +13,7 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 3 | Flow tracking, TCP stream reassembly, per-flow statistics, `flows` command | done |
 | 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`), `--filter` option | done |
 | 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts, `ids` command | done |
-| 6 | Live capture (Linux AF_PACKET) | planned |
+| 6 | Live capture (Linux AF_PACKET), `live` command | done |
 | 7 | Benchmarks, fuzz tests, CI | planned |
 
 ## Install
@@ -133,6 +133,16 @@ python -m sentinel ids attacks.pcap --rules rules/
 
 The same capture with `--format json` (the default) gives one object per alert with the fields `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence`. `python tools/gen_pcap.py --benign benign.pcap` writes busy but harmless traffic, and `ids` prints nothing for it.
 
+Capture from a network interface (Linux, needs root, listens only). Use it only on a network you own or may monitor:
+
+```
+sudo python -m sentinel live eth0
+sudo python -m sentinel live eth0 --filter "tcp and port 443" --write web.pcap --duration 60
+sudo python -m sentinel live eth0 --ids --format text
+```
+
+The first prints the same lines as `read`, as the packets arrive. The last runs the detectors and prints each alert when it is raised. Ctrl-C stops the capture, and a summary line goes to stderr: `# 812 packets, 3 dropped by the kernel`.
+
 ## Stage 1: pcap I/O and L2-L4 parsers
 
 **pcap.** Classic pcap, read and written in both byte orders and both time units (microsecond and nanosecond magic numbers). Timestamps are kept as integer nanoseconds, so a write-then-read round trip is exact. The reader streams from the file and rejects records with a captured length above 262,144 bytes. A corrupt record raises `PcapError` only after all earlier packets have been yielded.
@@ -249,6 +259,25 @@ Loading never raises. Every problem in every file is reported at once, with the 
 
 **Tests.** 441 tests in total. `tools/gen_pcap.py --benign` writes 647 packets kept just below every threshold (150 completed handshakes in one second, 14 ports of one host, 25 hosts on one port, 40 subdomains, long readable names, repeated ARP announcements): it must raise no alert. `--attacks` writes one of each attack and must raise exactly 13 alerts, listed one by one in the tests. Every detector is tested one below its threshold, at it, at the window edge and switched off, and the engine is fuzzed with random frames, truncations, corruptions and scrambled timestamps.
 
+## Stage 6: live capture
+
+`python -m sentinel live INTERFACE [--filter EXPR] [--write FILE] [--count N] [--duration SECONDS] [--ids [--rules PATH] [--format json|text]]` reads Ethernet frames from a Linux packet socket (`AF_PACKET`) and sends them through the pipeline the other commands use: decode, filter, then print (or, with `--ids`, run the detectors). The socket only receives; nothing is ever sent. Opening it needs root or the `CAP_NET_RAW` capability, and the interface is always named on the command line (there is no default).
+
+**Output.** One line per packet, in the `read` format, or with `--ids` one alert as soon as it is raised. Every line is flushed, so a pipe sees it at once. `--write FILE` saves the packets that match the filter as a pcap file, flushed after every packet, so a capture that is killed still leaves a readable file. `--count N` stops after N matching packets, `--duration S` after S seconds, and Ctrl-C at any time. When it ends, one line goes to stderr with the number of packets and, if the kernel reports any, how many it dropped because the program was too slow. With `--ids`, alerts about detector state limits are printed at that point.
+
+**Exit codes.** 0 when the capture ran and ended normally, including by Ctrl-C; 1 when it cannot start (no such interface, not Ethernet, not Linux, no permission, a `--write` file that cannot be opened) or fails while running; 2 for a bad filter, bad rules or bad options. All three are checked before the interface is opened.
+
+**Details.**
+
+- Timestamps are the system clock at the moment the program receives a packet, as integer nanoseconds. Written to a pcap file they are microseconds, like every other capture this project writes.
+- The interface must be Ethernet (`/sys/class/net/NAME/type` is 1) or loopback. The name is checked with the kernel's own rules before it is used in a path.
+- On the loopback interface the kernel hands out every packet twice, once leaving and once arriving. The leaving copy is dropped, so each packet appears once.
+- The receive wait is 0.5 s, so a time limit and Ctrl-C are noticed on a quiet network.
+
+**Long runs.** A live capture can meet more sources than a file does. Until this stage the detectors kept one sliding window per source, target or client for ever, so after 100,000 different ones they would have stopped watching new ones. Each table is now kept in order of last use, and a key that has been idle for longer than its window is forgotten (its window would be empty anyway). Found while designing this stage, and tested at the boundary: a key is kept for exactly one window and forgotten one microsecond later. The engine gained `pop_alerts()`, which hands out the alerts raised so far and forgets them, so a run of any length does not keep them all. A packet refused by a full port-scan table used to be counted twice in the state-limit alert (the detector has two tables); it is counted once.
+
+**Tests.** 526 run everywhere, and 4 more run only on Linux as root. The packet socket is replaced by a stand-in that hands out the frames of the generated captures, and the clock replays their timestamps, so the output of `live` must be exactly what `read` and `ids` print for the same capture: the same 13 alerts for the attack capture, printed at the packet that raised them and not at the end. Also tested: `--count`, `--duration` and Ctrl-C, the filter applied before counting and writing, the file readable while the capture runs, packets read back from `--write` equal to the ones captured, every error and its exit code, interface names and link types (against a folder that stands for `/sys/class/net`), the drop counter, random and cut-off frames through both modes, and the detector tables at the window edge. `tests/test_live_linux.py` captures a UDP datagram on the loopback interface with a real socket. It is skipped elsewhere; run it with `sudo python -m pytest tests/test_live_linux.py`.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -261,6 +290,7 @@ Loading never raises. Every problem in every file is reported at once, with the 
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
 - IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
+- Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it), so they can show `[bad ... checksum]`, and a VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface need Linux and root, and have not been run yet: everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
 - Only tested on Python 3.13, and only on synthetic traffic.
 
@@ -272,6 +302,7 @@ sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http
 sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
 sentinel/filter/   filter language: lexer, parser, evaluator
 sentinel/ids/      IDS engine: detectors, sliding window, rule loading, alerts
+sentinel/live/     live capture from a Linux packet socket
 rules/             default.toml, one rule per detector
 sentinel/summary.py  tcpdump-style line formatting
 sentinel/cli.py    command line entry point
