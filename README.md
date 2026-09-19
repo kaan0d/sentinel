@@ -1,5 +1,7 @@
 # sentinel
 
+[![CI](https://github.com/kaan0d/sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/kaan0d/sentinel/actions/workflows/ci.yml)
+
 Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
 
 Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean.
@@ -14,7 +16,7 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`), `--filter` option | done |
 | 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts, `ids` command | done |
 | 6 | Live capture (Linux AF_PACKET), `live` command | done |
-| 7 | Benchmarks, fuzz tests, CI | planned |
+| 7 | Benchmarks, fuzzer, CI | done |
 
 ## Install
 
@@ -142,6 +144,16 @@ sudo python -m sentinel live eth0 --ids --format text
 ```
 
 The first prints the same lines as `read`, as the packets arrive. The last runs the detectors and prints each alert when it is raised. Ctrl-C stops the capture, and a summary line goes to stderr: `# 812 packets, 3 dropped by the kernel`.
+
+## Results
+
+| What | Result |
+|------|--------|
+| Tests | 620 pass, 4 more need Linux and root; ruff and strict mypy are clean |
+| Sabotage | 196 deliberate one-line breaks of the code, every one caught by the tests |
+| Fuzzing | 3,000,000 damaged packets and capture files through the whole pipeline (seed 7): 0 failures |
+| Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
+| Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
 
 ## Stage 1: pcap I/O and L2-L4 parsers
 
@@ -278,6 +290,39 @@ Loading never raises. Every problem in every file is reported at once, with the 
 
 **Tests.** 526 run everywhere, and 4 more run only on Linux as root. The packet socket is replaced by a stand-in that hands out the frames of the generated captures, and the clock replays their timestamps, so the output of `live` must be exactly what `read` and `ids` print for the same capture: the same 13 alerts for the attack capture, printed at the packet that raised them and not at the end. Also tested: `--count`, `--duration` and Ctrl-C, the filter applied before counting and writing, the file readable while the capture runs, packets read back from `--write` equal to the ones captured, every error and its exit code, interface names and link types (against a folder that stands for `/sys/class/net`), the drop counter, random and cut-off frames through both modes, and the detector tables at the window edge. `tests/test_live_linux.py` captures a UDP datagram on the loopback interface with a real socket. It is skipped elsewhere; run it with `sudo python -m pytest tests/test_live_linux.py`.
 
+## Stage 7: benchmarks, fuzzer, CI
+
+**Benchmarks.** `python -m tools.bench [--packets N] [--repeat R] [--json]` measures how many packets per second each part handles. The traffic is the four generated captures one after the other, repeated with the time moved forward, so the workload is the same everywhere (about 65 bytes per packet on average: many small packets, as in the demo captures). Each stage runs `--repeat` times and the fastest run is kept. Every stage must handle every packet, or the run stops with an error instead of printing a number.
+
+Measured on AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD, 16 logical CPUs, Windows-11-10.0.26200-SP0, Python 3.13.5, 100,000 packets, fastest of 3 (one core is used; nothing runs in parallel):
+
+| Stage | packets/s | µs per packet | MB/s |
+|-------|-----------|---------------|------|
+| pcap read | 1,564,676 | 0.6 | 101.9 |
+| pcap write | 2,567,763 | 0.4 | 167.2 |
+| pcap write, flushed after every packet | 357,768 | 2.8 | 23.3 |
+| decode | 98,710 | 10.1 | 6.4 |
+| read: decode and print a line | 44,135 | 22.7 | 2.9 |
+| filter: decode and match | 65,206 | 15.3 | 4.2 |
+| flows: decode, reassemble, print | 59,330 | 16.9 | 3.9 |
+| ids: decode and run 4 detectors | 42,033 | 23.8 | 2.7 |
+| live loop, printing lines | 34,551 | 28.9 | 2.2 |
+| live loop, running the detectors | 37,716 | 26.5 | 2.5 |
+| live loop, saving to a file | 27,635 | 36.2 | 1.8 |
+
+Reading the table:
+
+- Decoding is about 10 µs per packet, and no single function dominates: in a profile of `decode`, IPv4 parsing, the dispatcher (`decode` itself), building `ipaddress` objects, TCP parsing and the checksums take 8 to 13% each, and the rest is spread thin. The stages above `decode` add their own work on top of it: printing a line costs about 13 µs more, the four detectors about 14 µs.
+- Every packet the `live` loop handles costs about 27 to 36 µs, so on this machine it keeps up with about 27,000 to 38,000 small packets per second, about 2 MB/s of 65-byte packets. Faster traffic is dropped by the kernel, and the summary line at the end says how many. Speed was measured, not tuned: nothing was changed to make a number better.
+- Flushing after every packet costs about 2.4 µs per packet (2.8 against 0.4 µs to write). That is a tenth of the `live` loop, and it buys a capture file that is readable even if the process is killed.
+- Numbers depend on the machine. Run the tool on yours.
+
+**Fuzzer.** `python -m tools.fuzz [--seed S] [--iterations N]` damages packets from the generated captures (a flipped bit, a length field set to an extreme, a cut, a piece deleted or repeated, the end of another packet spliced on; one to three damages each) and sends them through the decoder, the summary line, eight filters, one flow table and one detector engine that live for the whole run. Every fifth input is a small capture file, damaged the same way, read by the pcap reader. A failure is an exception (only `PcapError` may come out of the reader), a summary line that is not one line of printable ASCII, or an alert that is not one line of JSON. The same seed makes the same inputs, and a failing packet is printed as hex that `--replay` runs on its own. A run of 3,000,000 inputs (seed 7, 2,400,000 packets and 600,000 capture files) found nothing. That is a result about these inputs and these checks, not a proof: the damages are random, and the checks are only the ones listed. To see what the fuzzer is worth, each of the 148 deliberate breaks of stages 1 to 6 was applied to the code and the fuzzer run alone on it (30,000 inputs): it caught 2 (a control character in a printed line, and a `KeyError` in the SYN flood detector). The tests catch all 148. The fuzzer finds crashes and malformed output, not wrong answers.
+
+**CI.** `.github/workflows/ci.yml` runs ruff, `ruff format --check`, mypy strict, the tests, 200,000 fuzz inputs (the seed is the run number, so a failure can be repeated) and a small benchmark, on Python 3.12 and 3.13, on Linux and Windows. A second job runs `tests/test_live_linux.py` as root on a Linux runner and fails if those tests were skipped, so it is where the real packet socket is used for the first time. The workflow has not run yet: it was written on a machine that cannot run it. `tests/test_ci.py` checks that it runs every command listed under Development below, in order, on the Python versions the project claims.
+
+**Tests.** 624 in total (620 run here; 4 need Linux and root). The benchmark: the corpus is the four captures in order with each capture starting one second after the last ended, repeats keep the time moving forward, the timer keeps the fastest run, a stage that handles the wrong number of packets is an error, the flushed writer really is flushed (the file on disk is checked before each packet), the live stages print nothing and restore the command. The fuzzer: every damage checked against its definition (including brute force over every possible slice), the same seed giving the same run, every kind of failure detected with a substituted component that misbehaves (an exception, a summary with a control character, a filter that does not answer, an alert that is not JSON, a flow line with a line break, a pcap reader that raises something other than `PcapError`), and every option.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -292,7 +337,9 @@ Loading never raises. Every problem in every file is reported at once, with the 
 - IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
 - Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it), so they can show `[bad ... checksum]`, and a VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface need Linux and root, and have not been run yet: everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
-- Only tested on Python 3.13, and only on synthetic traffic.
+- Only run on Python 3.13 on Windows, and only on synthetic traffic. CI is set up for 3.12 and 3.13 on Linux and Windows, but has not run yet.
+- Speed: pure Python, one core. The `live` loop handles roughly 30,000 small packets per second on the machine above, so a busy network will make the kernel drop packets.
+- The fuzzer only checks that nothing raises and that output is well formed. It cannot tell a wrong parse from a right one.
 
 ## Project layout
 
@@ -307,13 +354,19 @@ rules/             default.toml, one rule per detector
 sentinel/summary.py  tcpdump-style line formatting
 sentinel/cli.py    command line entry point
 tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writer)
+tools/bench.py     benchmarks: packets per second for every stage
+tools/fuzz.py      fuzzer: damaged packets and capture files through the whole pipeline
+.github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root
 tests/             pytest tests
 ```
 
 ## Development
 
 ```
-pytest
+python -m pytest
 ruff check .
+ruff format --check .
 mypy
+python -m tools.fuzz
+python -m tools.bench
 ```
