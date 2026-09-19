@@ -27,7 +27,29 @@ def test_the_workflow_runs_every_command_the_readme_lists_for_developers() -> No
         assert name in WORKFLOW, command
 
 
-def test_the_workflow_runs_the_checks_in_order() -> None:
+def plain_scalar_problems(text: str) -> list[str]:
+    """Lines GitHub would refuse: YAML cannot have ": " or a tab in an unquoted value. A real
+    parser is not available (the standard library has none), so this checks the mistake that
+    happened: a step name like `Benchmark (for information: ...)` made the whole file invalid."""
+    problems = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if "\t" in line:
+            problems.append(f"line {number}: a tab")
+        match = re.match(r"^\s*(?:- )?[A-Za-z_-]+: (.+)$", line)
+        value = match.group(1) if match else ""
+        quoted = value.startswith(('"', "'", "|", ">", "[", "{"))
+        if match and not quoted and (": " in value or " #" in value):
+            problems.append(f"line {number}: unquoted value with ': ' or ' #': {line.strip()}")
+    return problems
+
+
+def test_the_workflow_is_well_formed_and_runs_the_checks_in_order() -> None:
+    assert plain_scalar_problems(WORKFLOW) == []
+    assert plain_scalar_problems("- name: Benchmark (for information: the numbers)") != []
+    assert plain_scalar_problems("  key:\tvalue") != []
+    assert plain_scalar_problems("  name: a # b") != []
+    assert plain_scalar_problems('  name: "a: b"') == []
+    assert plain_scalar_problems("  run: |") == []
     order = ["ruff check .", "ruff format --check .", "mypy", "python -m pytest", "tools.fuzz"]
     positions = [WORKFLOW.index(step) for step in order]
     assert positions == sorted(positions)

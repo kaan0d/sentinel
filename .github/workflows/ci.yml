@@ -35,7 +35,7 @@ jobs:
         run: python -m pytest
       - name: Fuzz (the seed is the run number, so a failure can be repeated)
         run: python -m tools.fuzz --iterations 200000 --seed ${{ github.run_number }}
-      - name: Benchmark (for information: the numbers depend on the runner)
+      - name: Benchmark (for information only, the numbers depend on the runner)
         run: python -m tools.bench --packets 20000 --repeat 1
 
   live-capture:
