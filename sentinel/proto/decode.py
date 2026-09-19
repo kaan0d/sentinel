@@ -76,7 +76,8 @@ def _decode_transport(
 def decode(frame: bytes) -> tuple[Layer, ...]:
     """Decodes an Ethernet frame into its layers, outermost first: Ethernet, then ARP or IP,
     then TCP/UDP/ICMP, then DNS/HTTP/TLS ClientHello. Stops after the first layer with an error
-    or an unknown protocol. IP fragments are not decoded further (no reassembly)."""
+    or an unknown protocol. The first fragment of an IPv4 packet is decoded like any packet, the
+    later ones stop after the IP header (there is no reassembly)."""
     eth = parse_ethernet(frame)
     layers: list[Layer] = [eth]
     if eth.error:
@@ -86,8 +87,11 @@ def decode(frame: bytes) -> tuple[Layer, ...]:
     elif eth.ethertype == ETHERTYPE_IPV4:
         ip4 = parse_ipv4(eth.payload)
         layers.append(ip4)
-        if not ip4.error and not ip4.is_fragment:
-            _decode_transport(layers, ip4.proto, ip4.payload, ip4.src, ip4.dst, ip4.is_complete)
+        if not ip4.error and ip4.frag_offset == 0:
+            # A first fragment holds the transport header, so it is decoded (tcpdump and tshark
+            # do too); its message is not whole, so its checksum is not verified.
+            complete = ip4.is_complete and not ip4.more_fragments
+            _decode_transport(layers, ip4.proto, ip4.payload, ip4.src, ip4.dst, complete)
     elif eth.ethertype == ETHERTYPE_IPV6:
         ip6 = parse_ipv6(eth.payload)
         layers.append(ip6)

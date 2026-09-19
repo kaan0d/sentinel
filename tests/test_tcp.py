@@ -1,6 +1,7 @@
 import struct
 
 from sentinel.proto import tcp
+from sentinel.proto.checksum import pseudo_header
 from sentinel.proto.tcp import TcpOption, parse_tcp
 from tools.gen_pcap import IP6_A, IP6_B, IP_A, IP_B, SYN_OPTIONS, tcp_segment
 
@@ -122,3 +123,50 @@ def test_random_bytes_never_raise(blobs: list[bytes]) -> None:
         parsed = parse_tcp(blob, src=IP_A, dst=IP_B)
         if len(blob) < 20:
             assert parsed.error is not None
+
+
+def folded_sum(data: bytes) -> int:
+    data += bytes(len(data) % 2)
+    total = sum(data[i] << 8 | data[i + 1] for i in range(0, len(data), 2))
+    while total > 0xFFFF:
+        total = (total & 0xFFFF) + (total >> 16)
+    return total
+
+
+def with_checksum(seg: bytes, value: int) -> bytes:
+    return seg[:16] + value.to_bytes(2, "big") + seg[18:]
+
+
+def offloaded(seg: bytes, src: object, dst: object, length: int | None = None) -> bytes:
+    """`seg` as a capture on the sending machine holds it: the checksum field is the sum of the
+    pseudo-header alone (not complemented), which the network card then completes."""
+    pseudo = pseudo_header(src, dst, 6, len(seg) if length is None else length)  # type: ignore[arg-type]
+    return with_checksum(seg, folded_sum(pseudo))
+
+
+def test_a_checksum_left_for_the_network_card_is_not_bad() -> None:
+    for src, dst in ((IP_A, IP_B), (IP6_A, IP6_B)):
+        for payload in (b"", PAYLOAD, b"odd length!"):
+            seg = tcp_segment(src, dst, 1234, 80, 100, 200, tcp.ACK, payload=payload)
+            assert parse_tcp(with_checksum(seg, 0), src=src, dst=dst).anomalies == (
+                "bad tcp checksum",
+            )
+            parsed = parse_tcp(offloaded(seg, src, dst), src=src, dst=dst)
+            assert parsed.anomalies == ()
+            assert parsed.payload == payload
+
+
+def test_only_the_exact_partial_checksum_is_accepted() -> None:
+    seg = make()
+    partial = folded_sum(pseudo_header(IP_A, IP_B, 6, len(seg)))
+    for value in (partial + 1, partial - 1, partial ^ 0x8000, ~partial & 0xFFFF):
+        bad = with_checksum(seg, value & 0xFFFF)
+        assert parse_tcp(bad, src=IP_A, dst=IP_B).anomalies == ("bad tcp checksum",)
+    other = pseudo_header(IP_A, IP_B, 6, len(seg) + 2)  # a pseudo-header with another length
+    assert parse_tcp(with_checksum(seg, folded_sum(other)), src=IP_A, dst=IP_B).anomalies == (
+        "bad tcp checksum",
+    )
+    wrong_addresses = pseudo_header(IP_B, IP_B, 6, len(seg))
+    assert parse_tcp(
+        with_checksum(seg, folded_sum(wrong_addresses)), src=IP_A, dst=IP_B
+    ).anomalies == ("bad tcp checksum",)

@@ -18,8 +18,8 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 6 | Live capture (Linux AF_PACKET), `live` command | done |
 | 7 | Benchmarks, fuzzer, CI | done |
 | 8 | pcapng reader: Wireshark's default file format, for `read`, `flows` and `ids` | done |
-| 9 | Compare with `tshark` on public sample captures, and fix every difference | next |
-| 10 | Two more detectors: SSH brute force, ICMP tunneling | planned |
+| 9 | Compare with `tshark` on generated and public sample captures, and fix every difference | done |
+| 10 | Two more detectors: SSH brute force, ICMP tunneling | next |
 | 11 | TLS fingerprint (JA3) from the ClientHello | planned |
 | 12 | Live capture on Windows, IP level only, if it turns out to be reliable | maybe |
 
@@ -157,10 +157,11 @@ The first prints the same lines as `read`, as the packets arrive. The last runs 
 
 | What | Result |
 |------|--------|
-| Tests | 727 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
+| Tests | 796 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
 | CI | GitHub Actions, 5 jobs green: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests as root on an Ubuntu runner (a real packet socket on the loopback interface) |
-| Sabotage | 253 deliberate one-line breaks of the code, every one caught by the tests |
-| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 8): 0 failures |
+| Sabotage | 299 deliberate one-line breaks of the code, every one caught by the tests |
+| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 9): 0 failures |
+| tshark | 10 captures (6 public ones from other people's networks), 2,987 packets, 68,756 field values compared with Wireshark's `tshark`: 0 unexplained differences, after 3 bugs found in Sentinel and fixed |
 | Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
 | Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
 
@@ -350,26 +351,69 @@ Reading the table:
 
 **Bad files.** Like the classic reader it raises `PcapError` only, after yielding the packets before the damage. It refuses a block length that is under 12 (28 for a section header), not a multiple of 4, or over 16 MiB, a length that is not repeated at the end of the block, a block cut short, a version other than 1, a packet for an interface that was not described, a captured length over 262,144 or past the end of the block, an interface option of the wrong size or one that runs past its block, and an out-of-range timestamp.
 
-**Checked against.** My tests build their files block by block from the format description, not with my generator. As a separate check, an independent implementation, `python-pcapng` 2.1.1 (installed in a scratch folder, not a dependency and not part of the tests), wrote files that this reader read, and read files that `tools/gen_pcap.py --pcapng` wrote: 12 combinations of byte order and timestamp resolution (66 packets) one way and 2,190 packets the other way, all equal to the nanosecond. I had no file written by Wireshark itself, so that is still unchecked.
+**Checked against.** My tests build their files block by block from the format description, not with my generator. As a separate check, an independent implementation, `python-pcapng` 2.1.1 (installed in a scratch folder, not a dependency and not part of the tests), wrote files that this reader read, and read files that `tools/gen_pcap.py --pcapng` wrote: 12 combinations of byte order and timestamp resolution (66 packets) one way and 2,190 packets the other way, all equal to the nanosecond. Stage 9 later checked it against files that Wireshark wrote.
 
 **Fuzzing.** The fuzzer now makes half of its capture files pcapng, and splices files of the two formats together. A run of 3,000,000 inputs (seed 8: 2,400,000 packets and 600,000 capture files, half of them pcapng) found nothing. As in stage 7, that is a result about these inputs and these checks, not a proof.
 
 **Tests.** 727 run here (107 new, 84 of them in `tests/test_pcapng.py`), and 6 need Linux and root. Every resolution, both byte orders, several sections and interfaces, skipped blocks, simple blocks, every refusal with its message, both ends of the timestamp range (the last accepted second must be printable, the next must not be), every prefix of a valid file in both byte orders and every byte replaced in turn (the reader may only raise `PcapError`, and a cut at a block boundary must be a prefix of the real packets), and `read`, `flows` and `ids` giving the same output for the pcap and the pcapng version of each of the four generated captures. Sabotage: 57 new one-line breaks (253 in all), every one caught. Three of them made the first run hang instead of fail; the cause was pytest building a diff of two 647-line outputs after a failed comparison, not the code, and the test now reports the first different line instead.
 
+## Stage 9: compared with tshark
+
+**Why.** Everything up to stage 8 was tested against traffic I generated and against my own reading of the protocols, so a misreading of mine could be in both. `tshark` is written by other people and has read far more traffic. This stage compares the two, and fixes what differs.
+
+**The tool.** `python -m tools.compare_tshark CAPTURE...` is a development tool: it needs Wireshark's `tshark` (found on `PATH`, in the `TSHARK` variable, in the default Windows folder, or with `--tshark PATH`) and nothing in Sentinel needs it. It runs `tshark` with reassembly, sequence analysis and defragmentation switched off, because `read` looks at one packet at a time, and with checksums verified. It reads about 75 fields per packet (frame length, Ethernet and VLAN, ARP, IPv4, IPv6, TCP with its options, UDP, ICMP, DNS, HTTP, the TLS ClientHello) and compares each one with what Sentinel decoded, in the same form. It also compares the TCP and UDP conversations `tshark` numbers with the flows Sentinel finds (protocol, both ends, packet count; idle timeouts off, since `tshark` has none). A field that only one of them reports is listed apart. The exit code is 1 if anything differs that is not explained.
+
+**Results** (Wireshark 4.6.8):
+
+| Capture | From | Format | Packets | Values compared | Differences | Explained |
+|---------|------|--------|---------|-----------------|-------------|-----------|
+| `sample.pcap` | generated here | pcap | 19 | 529 | 0 | 20 |
+| `streams.pcap` | generated here | pcap | 32 | 892 | 0 | 27 |
+| `benign.pcap` | generated here | pcap | 647 | 17,906 | 0 | 156 |
+| `attacks.pcap` | generated here | pcap | 1,044 | 29,884 | 0 | 333 |
+| `dns.cap` | Wireshark sample captures | pcap | 38 | 1,356 | 0 | 57 |
+| `ipv4frags.pcap` | Wireshark sample captures | pcap | 3 | 57 | 0 | 0 |
+| `200722_win_scale_examples_anon.pcapng` | Wireshark sample captures | pcapng | 26 | 719 | 0 | 0 |
+| `v6.pcap` | Wireshark sample captures | pcap | 161 | 3,548 | 0 | 126 |
+| `vlan.cap` | Wireshark sample captures | pcap | 395 | 7,645 | 0 | 25 |
+| `arp-storm.pcap` | Wireshark sample captures | pcap | 622 | 6,220 | 0 | 0 |
+
+10 captures, 2,987 packets (1,245 of them from public captures), 68,756 field values, no unexplained difference. The public captures are small files from the Wireshark sample captures page (about 110 KB in all). They are not in this repository, which holds only traffic that I generated: download them to a folder next to it (`../sentinel-samples`), from `https://gitlab.com/wireshark/wireshark/-/wikis/uploads/__moin_import__/attachments/SampleCaptures/NAME`, with NAME one of `dns.cap`, `ipv4frags.pcap`, `200722_win_scale_examples_anon.pcapng`, `v6.pcap`, `vlan.cap.gz` (unpack it) and `arp-storm.pcap`.
+
+**Explained differences.** 744 field differences are not disagreements, and each is counted with its reason instead of being dropped:
+- 618 x: tshark shows these flags only in responses.
+- 76 x: tshark reads the packet quoted inside an ICMP error.
+- 25 x: an 802.3 frame with an LLC header: not decoded above Ethernet.
+- 21 x: a DNS message that is not whole in this segment (flows reads it).
+- 2 x: tshark shows the request that a response answers.
+- 2 x: a ClientHello that is cut short: tshark reads none of it.
+
+**What it found.** Three real bugs, all in captures made by other people:
+
+- *Checksum offload.* A capture made on the sending machine holds TCP and UDP checksums that the network card has not finished: the field is the sum of the pseudo-header alone, not complemented. In the `win_scale` capture 14 of 26 TCP packets were reported as `[bad tcp checksum]`. `tshark` calls them correct. Now a checksum that is exactly the partial sum is not reported as bad (this was the known false positive of the first stages). Any other wrong value still is.
+- *First IPv4 fragments.* A fragment was never decoded further, but the first one holds the transport header. `ipv4frags.pcap` printed an ICMP echo as `ip-proto-1`. Now the first fragment is decoded (its checksum cannot be verified, the message is not whole), later ones stop at the IP header. Filters and flows follow: `tcp` and `port` match a first fragment, and a first UDP fragment is a flow.
+- *802.3 frames.* A frame whose type field is below 0x0600 carries a length and an LLC header (spanning tree, NetBIOS). `read` printed the length as `ethertype 0x00a6`. It now prints `802.3`. Such frames are still not decoded above Ethernet, so ARP inside LLC/SNAP (in `vlan.cap`) is not seen.
+
+**Wireshark's own pcapng.** `editcap -F pcapng` (Wireshark 4.6.8) converted 9 of the captures, and this reader gave back the same 2,961 packets as the classic file, timestamps included. The `win_scale` capture is a pcapng that Wireshark wrote itself, and it compares clean. That closes what stage 8 could not check.
+
+**Tests.** 796 run here (69 new: the checksum, fragment and 802.3 changes, and `tests/test_compare_tshark.py`), and 6 need Linux and root. The tool is tested with rows written by hand in the form `tshark` prints them (every conversion, every rule for an explained difference and its limits, the arithmetic of a file, the report, the command line, the command that runs `tshark`), and with the real `tshark`, when it is installed (the generated captures in both formats must agree, and swapping one field of Sentinel's must be noticed for every packet that has it). Those last tests are skipped where `tshark` is missing, so CI does not run them. Sabotage: 46 new one-line breaks (299 in all), every one caught. Seven survived the first run, all in the tool's own tests (a rule that explained too much, a count that took either side, a line of `tshark` output with too many columns), and the tests were tightened. Fuzzing: 3,000,000 inputs (seed 9), 0 failures.
+
+**What this does not show.** Only header fields and conversation counts are compared, not the bytes of a reassembled stream, and only against one version of `tshark`. Six public captures of about 110 KB are a small sample of what a network sends. The two programs can be wrong in the same way, but they were written by different people from the same documents.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
-- IP fragments are not reassembled.
+- IP fragments are not reassembled. The first fragment of an IPv4 packet is decoded like any packet (its checksum is not verified); later fragments stop at the IP header.
 - Reassembly is offline: `data()` is read when the capture is done, not delivered as it arrives. Streams are limited to their first 1 MiB. Overlap handling is first-copy-wins; other operating systems may resolve overlaps differently.
 - Flows: TCP and UDP only, VLAN tags are not part of a flow's identity, and a flow idle longer than the timeout is split in two.
 - `read` still works one segment at a time, so it can misread what `flows` gets right: a DNS-over-TCP message split across segments is skipped, and a segment from the middle of a stream that starts with a method name such as `GET ` is read as HTTP.
 - Filters: no host names, no `ether host`, `len`, byte offsets or TCP flag words. `dns`, `http` and `tls` match per packet (a segment that starts a message), not per connection. `flows --filter` filters packets, not whole flows.
-- ARP: Ethernet/IPv4 only. Only link type Ethernet is read.
-- pcapng: name resolution and interface statistics blocks, comments and packet flags are skipped, and compressed files (`.pcapng.gz`) are not opened. A simple packet block has no timestamp, so a file of only those has every time at 0. Only the generator writes pcapng; `live --write` still saves classic pcap. No file written by Wireshark itself was available to test against.
+- ARP: Ethernet/IPv4 only. Only link type Ethernet is read. Frames with an 802.3 length instead of an ethertype (an LLC header: spanning tree, NetBIOS, SNAP-encapsulated ARP or IP) print as `802.3` and are not decoded above Ethernet.
+- pcapng: name resolution and interface statistics blocks, comments and packet flags are skipped, and compressed files (`.pcapng.gz`) are not opened. A simple packet block has no timestamp, so a file of only those has every time at 0. Only the generator writes pcapng; `live --write` still saves classic pcap. Files written by Wireshark 4.6.8 were checked in stage 9.
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
 - IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
-- Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it), so they can show `[bad ... checksum]`, and a VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
+- Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
 - Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Only synthetic traffic, and no real network apart from the loopback test.
 - Speed: pure Python, one core. The `live` loop handles roughly 30,000 small packets per second on the machine above, so a busy network will make the kernel drop packets.
@@ -390,6 +434,7 @@ sentinel/cli.py    command line entry point
 tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writer)
 tools/bench.py     benchmarks: packets per second for every stage
 tools/fuzz.py      fuzzer: damaged packets and capture files through the whole pipeline
+tools/compare_tshark.py  compares Sentinel's decoding with tshark's (needs Wireshark)
 .github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root
 tests/             pytest tests
 ```

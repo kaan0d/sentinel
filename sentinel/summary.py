@@ -9,7 +9,7 @@ from sentinel.proto import tcp
 from sentinel.proto.arp import ARP_REPLY, ARP_REQUEST, Arp
 from sentinel.proto.decode import decode
 from sentinel.proto.dns import RCODE_NAMES, RTYPE_NAMES, Dns, DnsRecord
-from sentinel.proto.ethernet import Ethernet
+from sentinel.proto.ethernet import MIN_ETHERTYPE, Ethernet
 from sentinel.proto.http import Http
 from sentinel.proto.icmp import ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, Icmp
 from sentinel.proto.ipv4 import IPv4
@@ -183,10 +183,8 @@ def _body(layers: Sequence[Layer], wire_len: int) -> str:
     if isinstance(l3, IPv4 | IPv6):
         l4 = layers[2] if len(layers) > 2 else None
         return vlan + _ip(l3, l4, layers[3] if len(layers) > 3 else None)
-    return (
-        f"{vlan}{eth.src.hex(':')} > {eth.dst.hex(':')}, "
-        f"ethertype {eth.ethertype:#06x}, length {wire_len}"
-    )
+    kind = "802.3" if eth.ethertype < MIN_ETHERTYPE else f"ethertype {eth.ethertype:#06x}"
+    return f"{vlan}{eth.src.hex(':')} > {eth.dst.hex(':')}, {kind}, length {wire_len}"
 
 
 def describe(layers: Sequence[Layer], wire_len: int) -> str:

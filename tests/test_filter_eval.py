@@ -318,14 +318,17 @@ def test_errors_in_a_layer_are_handled_as_documented() -> None:
     assert not parse_filter("net 0.0.0.0/0").matches(cut_ip)
 
 
-def test_ip_fragments_match_ip_but_not_tcp() -> None:
-    # decode() does not look past the IP header of a fragment, first or later.
-    for frame in (extra_frames()[1], extra_frames()[2]):
-        layers = decode(frame)
+def test_a_first_fragment_matches_tcp_and_a_later_one_does_not() -> None:
+    # decode() reads the transport header of a first fragment, and stops after the IP header of
+    # a later one, which has no such header.
+    first, later = decode(extra_frames()[1]), decode(extra_frames()[2])
+    for layers in (first, later):
         assert parse_filter("ip").matches(layers)
-        assert not parse_filter("tcp").matches(layers)
         assert parse_filter("host 10.0.0.1").matches(layers)
-        assert not parse_filter("port 4000").matches(layers)
+    assert parse_filter("tcp").matches(first)
+    assert parse_filter("port 4000").matches(first)
+    assert not parse_filter("tcp").matches(later)
+    assert not parse_filter("port 4000").matches(later)
 
 
 def test_any_vlan_tag_counts() -> None:

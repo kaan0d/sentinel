@@ -181,14 +181,29 @@ def test_ipv6_and_vlan() -> None:
 
 def test_packets_that_are_not_flows_are_only_counted() -> None:
     echo = eth_frame(MAC_B, MAC_A, 0x0800, ipv4_packet(IP_A, IP_B, 1, icmp_message(8, 0, 1, b"x")))
-    fragment = eth_frame(
-        MAC_B, MAC_A, 0x0800, ipv4_packet(IP_A, IP_B, 17, b"x" * 30, flags_frag=0x2000)
+    fragment = eth_frame(  # a later fragment: it has no transport header
+        MAC_B, MAC_A, 0x0800, ipv4_packet(IP_A, IP_B, 17, b"x" * 30, flags_frag=0x0004)
     )
     arp = eth_frame(MAC_B, MAC_A, 0x0806, bytes(28))
     table = table_of(*(Packet(0, len(f), f) for f in (echo, fragment, arp, b"junk", bytes(60))))
     assert table.flows == []
     assert table.skipped_packets == 5
     assert format_footer(table) == "# 0 flows, 0 packets in flows, 5 not in a flow"
+
+
+def test_the_first_fragment_of_a_udp_datagram_is_a_flow_and_a_later_one_is_not() -> None:
+    datagram = udp_datagram(IP_A, IP_B, 5000, 6000, b"y" * 40)
+    first = ipv4_packet(IP_A, IP_B, 17, datagram[:24], flags_frag=0x2000)
+    later = ipv4_packet(IP_A, IP_B, 17, datagram[24:], flags_frag=0x0003)
+    frames = [eth_frame(MAC_B, MAC_A, 0x0800, part) for part in (first, later)]
+    table = table_of(*(Packet(i, len(f), f) for i, f in enumerate(frames)))
+    assert len(table.flows) == 1
+    assert (str(table.flows[0].client), str(table.flows[0].server)) == (
+        "10.0.0.1:5000",
+        "10.0.0.2:6000",
+    )
+    assert table.flows[0].packets == [1, 0]
+    assert table.skipped_packets == 1
 
 
 def test_the_flow_limit() -> None:

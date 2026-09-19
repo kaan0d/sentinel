@@ -2,7 +2,7 @@ import struct
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
 
-from sentinel.proto.checksum import internet_checksum, pseudo_header
+from sentinel.proto.checksum import internet_checksum, is_partial_checksum, pseudo_header
 from sentinel.proto.layer import Layer
 
 FIN = 0x001
@@ -84,12 +84,10 @@ def parse_tcp(
     anomalies: list[str] = []
     if option_error:
         anomalies.append(option_error)
-    if (
-        src is not None
-        and dst is not None
-        and internet_checksum(pseudo_header(src, dst, _PROTO, len(data)) + data) != 0
-    ):
-        anomalies.append("bad tcp checksum")
+    if src is not None and dst is not None:
+        pseudo = pseudo_header(src, dst, _PROTO, len(data))
+        if internet_checksum(pseudo + data) != 0 and not is_partial_checksum(csum, pseudo):
+            anomalies.append("bad tcp checksum")
     return Tcp(
         src_port=sport,
         dst_port=dport,

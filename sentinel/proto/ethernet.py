@@ -8,6 +8,7 @@ ETHERTYPE_ARP = 0x0806
 ETHERTYPE_VLAN = 0x8100
 ETHERTYPE_QINQ = 0x88A8
 ETHERTYPE_IPV6 = 0x86DD
+MIN_ETHERTYPE = 0x0600
 
 _HEADER_LEN = 14
 _TAG_LEN = 4
@@ -17,7 +18,9 @@ _TAG_LEN = 4
 class Ethernet(Layer):
     dst: bytes = b""
     src: bytes = b""
-    ethertype: int = 0  # the inner ethertype, after any VLAN tags
+    # The inner ethertype, after any VLAN tags. Below 0x0600 it is not an ethertype but the
+    # length of an 802.3 frame that carries an LLC header (spanning tree, NetBIOS...).
+    ethertype: int = 0
     vlans: tuple[int, ...] = ()  # VLAN ids, outermost first
 
 

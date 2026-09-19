@@ -83,10 +83,53 @@ def test_bad_checksums_are_reported_at_every_layer() -> None:
     assert layers[2].anomalies == ("bad udp checksum",)
 
 
-def test_fragments_are_not_decoded_further() -> None:
-    frag = ipv4_packet(IP_A, IP_B, 17, b"x" * 30, flags_frag=0x2000 | 4)
-    layers = decode(eth_frame(MAC_B, MAC_A, 0x0800, frag))
-    assert tuple(type(layer) for layer in layers) == (Ethernet, IPv4)
+def test_later_fragments_are_not_decoded_further() -> None:
+    for flags_frag in (0x2000 | 4, 4):  # a middle fragment and the last one
+        frag = ipv4_packet(IP_A, IP_B, 17, b"x" * 30, flags_frag=flags_frag)
+        layers = decode(eth_frame(MAC_B, MAC_A, 0x0800, frag))
+        assert tuple(type(layer) for layer in layers) == (Ethernet, IPv4)
+
+
+def test_a_first_fragment_is_decoded_but_its_checksum_is_not_verified() -> None:
+    datagram = bytearray(udp_datagram(IP_A, IP_B, 5000, 6000, b"payload"))
+    datagram[-1] ^= 0xFF  # the checksum is now wrong
+    whole = ipv4_packet(IP_A, IP_B, 17, bytes(datagram))
+    first = ipv4_packet(IP_A, IP_B, 17, bytes(datagram), flags_frag=0x2000)
+    assert decode(eth_frame(MAC_B, MAC_A, 0x0800, whole))[2].anomalies == ("bad udp checksum",)
+    layers = decode(eth_frame(MAC_B, MAC_A, 0x0800, first))
+    assert tuple(type(layer) for layer in layers) == (Ethernet, IPv4, Udp)
+    udp = layers[2]
+    assert isinstance(udp, Udp)
+    assert (udp.src_port, udp.dst_port) == (5000, 6000)
+    assert udp.anomalies == ()  # the message is not whole, so nothing to verify
+
+
+def test_a_first_fragment_of_a_longer_message_is_decoded_with_its_own_anomaly() -> None:
+    datagram = udp_datagram(IP_A, IP_B, 5000, 53, b"x" * 40)
+    first = ipv4_packet(IP_A, IP_B, 17, datagram[:20], flags_frag=0x2000)
+    udp = decode(eth_frame(MAC_B, MAC_A, 0x0800, first))[2]
+    assert isinstance(udp, Udp)
+    assert udp.anomalies == ("truncated udp datagram: length 48, captured 20",)
+
+
+def test_a_frame_with_a_length_instead_of_an_ethertype_stops_after_ethernet() -> None:
+    for length in (0x0026, 0x05FF):  # 802.3 with an LLC header behind it
+        layers = decode(eth_frame(MAC_B, MAC_A, length, b"llc payload"))
+        assert len(layers) == 1
+        assert isinstance(layers[0], Ethernet)
+        assert layers[0].error is None
+        assert layers[0].ethertype == length
+
+
+def test_the_summary_says_802_3_below_0x0600_and_an_ethertype_from_there_on() -> None:
+    below = describe(decode(eth_frame(MAC_B, MAC_A, 0x05FF, b"x" * 20)), 60)
+    assert below.endswith(", 802.3, length 60")
+    assert "ethertype" not in below
+    from_there = describe(decode(eth_frame(MAC_B, MAC_A, 0x0600, b"x" * 20)), 60)
+    assert from_there.endswith(", ethertype 0x0600, length 60")
+    tagged = describe(decode(eth_frame(MAC_B, MAC_A, 0x0026, b"x" * 20, vlan=5)), 64)
+    assert tagged.startswith("vlan 5, ")
+    assert tagged.endswith(", 802.3, length 64")
 
 
 def test_unknown_ethertype_stops_after_ethernet() -> None:

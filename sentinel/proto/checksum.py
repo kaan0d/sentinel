@@ -12,6 +12,13 @@ def internet_checksum(data: bytes) -> int:
     return ~total & 0xFFFF
 
 
+def is_partial_checksum(checksum: int, pseudo: bytes) -> bool:
+    """True if `checksum` is the sum of the pseudo-header alone, not complemented. That is the
+    value a network card is handed to finish (checksum offload), so a capture taken on the
+    sending machine holds it in the segments that machine sent, and it is not a bad checksum."""
+    return checksum == ~internet_checksum(pseudo) & 0xFFFF
+
+
 def pseudo_header(
     src: IPv4Address | IPv6Address, dst: IPv4Address | IPv6Address, proto: int, length: int
 ) -> bytes:

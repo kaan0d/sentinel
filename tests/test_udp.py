@@ -1,5 +1,6 @@
 import struct
 
+from sentinel.proto.checksum import pseudo_header
 from sentinel.proto.udp import parse_udp
 from tools.gen_pcap import IP6_A, IP6_B, IP_A, IP_B, udp_datagram
 
@@ -85,3 +86,33 @@ def test_random_bytes_never_raise(blobs: list[bytes]) -> None:
         udp = parse_udp(blob, src=IP_A, dst=IP_B)
         if len(blob) < 8:
             assert udp.error is not None
+
+
+def folded_sum(data: bytes) -> int:
+    data += bytes(len(data) % 2)
+    total = sum(data[i] << 8 | data[i + 1] for i in range(0, len(data), 2))
+    while total > 0xFFFF:
+        total = (total & 0xFFFF) + (total >> 16)
+    return total
+
+
+def test_a_checksum_left_for_the_network_card_is_not_bad() -> None:
+    for src, dst in ((IP_A, IP_B), (IP6_A, IP6_B)):
+        for payload in (b"", PAYLOAD, b"odd length!"):
+            raw = udp_datagram(src, dst, 5353, 53, payload)
+            partial = folded_sum(pseudo_header(src, dst, 17, len(raw)))
+            offloaded = raw[:6] + partial.to_bytes(2, "big") + raw[8:]
+            parsed = parse_udp(offloaded, src=src, dst=dst)
+            assert parsed.anomalies == ()
+            assert parsed.payload == payload
+
+
+def test_only_the_exact_partial_udp_checksum_is_accepted() -> None:
+    raw = make()
+    partial = folded_sum(pseudo_header(IP_A, IP_B, 17, len(raw)))
+    for value in (partial + 1, partial - 1, partial ^ 0x8000, ~partial & 0xFFFF):
+        bad = raw[:6] + (value & 0xFFFF).to_bytes(2, "big") + raw[8:]
+        assert parse_udp(bad, src=IP_A, dst=IP_B).anomalies == ("bad udp checksum",)
+    other = folded_sum(pseudo_header(IP_A, IP_B, 17, len(raw) + 2))
+    bad = raw[:6] + other.to_bytes(2, "big") + raw[8:]
+    assert parse_udp(bad, src=IP_A, dst=IP_B).anomalies == ("bad udp checksum",)

@@ -7,8 +7,8 @@ Semantics follow tcpdump where they exist:
   of ARP. `port`/`portrange` look at TCP and UDP ports. These need an intact header, so they
   are false for a layer with an error.
 - `src` and `dst` pick one side; without them, either side matches.
-- `decode()` does not look past the IP header of a fragment, so a fragment matches `ip` and
-  `host` but not `tcp` or `port`."""
+- `decode()` reads the transport header of a first fragment but not of a later one, which has
+  none, so a later fragment matches `ip` and `host` but not `tcp` or `port`."""
 
 from collections.abc import Callable, Sequence
 

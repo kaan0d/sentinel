@@ -2,7 +2,7 @@ import struct
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
 
-from sentinel.proto.checksum import internet_checksum, pseudo_header
+from sentinel.proto.checksum import internet_checksum, is_partial_checksum, pseudo_header
 from sentinel.proto.layer import Layer
 
 _LEN = 8
@@ -38,7 +38,10 @@ def parse_udp(
             anomalies.append(f"udp length {length} shorter than the {len(data)} bytes present")
         if src is not None and dst is not None:
             if csum != 0:
-                if internet_checksum(pseudo_header(src, dst, _PROTO, length) + data[:length]) != 0:
+                pseudo = pseudo_header(src, dst, _PROTO, length)
+                if internet_checksum(pseudo + data[:length]) != 0 and not is_partial_checksum(
+                    csum, pseudo
+                ):
                     anomalies.append("bad udp checksum")
             elif isinstance(src, IPv6Address):
                 anomalies.append("zero udp checksum over ipv6")  # mandatory in IPv6
