@@ -85,3 +85,21 @@ def test_without_root_the_error_says_what_is_needed() -> None:
 def test_an_interface_that_does_not_exist() -> None:
     with pytest.raises(LiveError, match="no such interface: nope0"):
         open_capture("nope0")
+
+
+@needs_root
+def test_a_datagram_on_loopback_is_seen_exactly_once() -> None:
+    # The kernel gives a packet socket each loopback packet twice, leaving and arriving. The
+    # capture drops the leaving copy, so a datagram must appear once.
+    capture = open_capture("lo")
+    try:
+        marker = b"sentinel-once-" + os.urandom(8).hex().encode()
+        send_udp(marker, 40446)
+        seen = 0
+        for packet in capture.packets(1.5):
+            udp = next((layer for layer in decode(packet.data) if isinstance(layer, Udp)), None)
+            if udp is not None and udp.payload == marker:
+                seen += 1
+        assert seen == 1
+    finally:
+        capture.close()
