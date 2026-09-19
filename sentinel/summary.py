@@ -8,12 +8,15 @@ from sentinel.pcap import Packet
 from sentinel.proto import tcp
 from sentinel.proto.arp import ARP_REPLY, ARP_REQUEST, Arp
 from sentinel.proto.decode import decode
+from sentinel.proto.dns import RCODE_NAMES, RTYPE_NAMES, Dns, DnsRecord
 from sentinel.proto.ethernet import Ethernet
+from sentinel.proto.http import Http
 from sentinel.proto.icmp import ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, Icmp
 from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.ipv6 import IPv6
 from sentinel.proto.layer import Layer
 from sentinel.proto.tcp import Tcp, TcpOption
+from sentinel.proto.tls import CIPHER_NAMES, VERSION_NAMES, TlsClientHello, is_grease
 from sentinel.proto.udp import Udp
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -71,6 +74,64 @@ def _tcp(t: Tcp) -> str:
     return ", ".join(parts)
 
 
+_DNS_TEXT_TYPES = {1, 2, 5, 12, 15, 16, 28}
+
+
+def _dns_type(rtype: int) -> str:
+    return RTYPE_NAMES.get(rtype, f"TYPE{rtype}")
+
+
+def _dns_record(r: DnsRecord) -> str:
+    if r.rtype not in _DNS_TEXT_TYPES:
+        return _dns_type(r.rtype)
+    text = r.text if len(r.text) <= 60 else r.text[:57] + "..."
+    return f"{_dns_type(r.rtype)} {text}"
+
+
+def _dns(d: Dns) -> str:
+    head = f"DNS {'response' if d.is_response else 'query'} {d.ident}"
+    if d.is_response:
+        head += " " + RCODE_NAMES.get(d.rcode, f"rcode {d.rcode}")
+    parts = [head] + [f"{_dns_type(q.qtype)}? {q.name}" for q in d.questions]
+    if d.answers:
+        shown = [_dns_record(r) for r in d.answers[:4]]
+        parts.append("answers [" + ", ".join(shown + ["..."] * (len(d.answers) > 4)) + "]")
+    return ", ".join(parts)
+
+
+def _http(h: Http) -> str:
+    if not h.is_request:
+        return f"HTTP: {h.version} {h.status} {h.reason}".rstrip()
+    host = h.header("host")
+    return f"HTTP: {h.method} {h.target} {h.version}" + (f", host {host}" if host else "")
+
+
+def _version(v: int) -> str:
+    return VERSION_NAMES.get(v, f"{v:#06x}")
+
+
+def _tls(t: TlsClientHello) -> str:
+    versions = [v for v in t.supported_versions if not is_grease(v)] or [t.client_version]
+    suites = [c for c in t.cipher_suites if not is_grease(c)]
+    names = [CIPHER_NAMES.get(c, f"{c:#06x}") for c in suites[:3]]
+    more = [f"+{len(suites) - 3} more"] if len(suites) > 3 else []
+    parts = ["TLS ClientHello"]
+    if t.server_name is not None:
+        parts.append(f"sni {t.server_name}")
+    parts.append("versions [" + ", ".join(_version(v) for v in versions) + "]")
+    parts.append(f"ciphers ({len(suites)}) [" + ", ".join(names + more) + "]")
+    return ", ".join(parts)
+
+
+def _app(app: Layer) -> str:
+    if isinstance(app, Dns):
+        return _dns(app)
+    if isinstance(app, Http):
+        return _http(app)
+    assert isinstance(app, TlsClientHello)
+    return _tls(app)
+
+
 def _icmp(i: Icmp) -> str:
     length = 8 + len(i.payload)
     if i.icmp_type in (ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST):
@@ -90,7 +151,7 @@ def _arp(a: Arp) -> str:
     return f"ARP, op {a.op}, length 28"
 
 
-def _ip(ip: IPv4 | IPv6, l4: Layer | None) -> str:
+def _ip(ip: IPv4 | IPv6, l4: Layer | None, app: Layer | None) -> str:
     name = "IP" if isinstance(ip, IPv4) else "IP6"
     if ip.error:
         return name
@@ -103,12 +164,12 @@ def _ip(ip: IPv4 | IPv6, l4: Layer | None) -> str:
         return f"{head}ip-proto-{proto}, length {len(ip.payload)}"
     if l4.error:
         return head + type(l4).__name__.upper()
-    if isinstance(l4, Tcp):
-        return head + _tcp(l4)
-    if isinstance(l4, Udp):
-        return f"{head}UDP, length {len(l4.payload)}"
-    assert isinstance(l4, Icmp)
-    return head + _icmp(l4)
+    if isinstance(l4, Icmp):
+        return head + _icmp(l4)
+    text = _tcp(l4) if isinstance(l4, Tcp) else f"UDP, length {len(l4.payload)}"
+    if app is not None and not app.error:
+        text += ": " + _app(app)
+    return head + text
 
 
 def _body(layers: Sequence[Layer], wire_len: int) -> str:
@@ -120,7 +181,8 @@ def _body(layers: Sequence[Layer], wire_len: int) -> str:
     if isinstance(l3, Arp):
         return vlan + _arp(l3)
     if isinstance(l3, IPv4 | IPv6):
-        return vlan + _ip(l3, layers[2] if len(layers) > 2 else None)
+        l4 = layers[2] if len(layers) > 2 else None
+        return vlan + _ip(l3, l4, layers[3] if len(layers) > 3 else None)
     return (
         f"{vlan}{eth.src.hex(':')} > {eth.dst.hex(':')}, "
         f"ethertype {eth.ethertype:#06x}, length {wire_len}"

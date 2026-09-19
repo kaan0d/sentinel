@@ -1,4 +1,4 @@
-"""Generate a small synthetic pcap covering every Stage 1 protocol.
+"""Generate a small synthetic pcap covering every supported protocol.
 
     python tools/gen_pcap.py out.pcap
 
@@ -131,9 +131,85 @@ def icmp_message(icmp_type: int, code: int, rest: int, payload: bytes = b"") -> 
 SYN_OPTIONS = bytes.fromhex("020405b40402080a000003e80000000001030307")
 
 
+def dns_name(name: str) -> bytes:
+    return b"".join(bytes([len(label)]) + label.encode() for label in name.split(".")) + b"\0"
+
+
+def dns_query(ident: int, name: str, qtype: int = 1) -> bytes:
+    header = struct.pack("!6H", ident, 0x0100, 1, 0, 0, 0)
+    return header + dns_name(name) + struct.pack("!HH", qtype, 1)
+
+
+def dns_cname_response() -> bytes:
+    """Answer to `www.example.com A`: a CNAME to example.com, then that name's A record.
+    Both answers use compression pointers: 0xc00c is the question name, 0xc010 is the
+    `example.com` part inside it."""
+    question = dns_name("www.example.com") + struct.pack("!HH", 1, 1)
+    cname = struct.pack("!HHHIH", 0xC00C, 5, 1, 300, 2) + struct.pack("!H", 0xC010)
+    a_record = struct.pack("!HHHIH", 0xC010, 1, 1, 300, 4) + IPv4Address("192.0.2.1").packed
+    return struct.pack("!6H", 0x1234, 0x8180, 1, 2, 0, 0) + question + cname + a_record
+
+
+def client_hello(sni: str, versions: Sequence[int], ciphers: Sequence[int]) -> bytes:
+    """A TLS ClientHello record shaped like a browser's, with GREASE values mixed in."""
+
+    def ext(kind: int, body: bytes) -> bytes:
+        return struct.pack("!HH", kind, len(body)) + body
+
+    name = sni.encode()
+    extensions = (
+        ext(0x1A1A, b"")
+        + ext(0, struct.pack("!HBH", len(name) + 3, 0, len(name)) + name)
+        + ext(10, struct.pack("!HHHH", 6, 0x001D, 0x0017, 0x0018))
+        + ext(43, bytes([2 * len(versions)]) + b"".join(struct.pack("!H", v) for v in versions))
+    )
+    body = (
+        struct.pack("!H", 0x0303)
+        + bytes(range(32))  # random
+        + bytes([32])
+        + bytes(range(32, 64))  # session id
+        + struct.pack("!H", 2 * len(ciphers))
+        + b"".join(struct.pack("!H", c) for c in ciphers)
+        + bytes([1, 0])  # compression: null only
+        + struct.pack("!H", len(extensions))
+        + extensions
+    )
+    handshake = bytes([1]) + len(body).to_bytes(3) + body
+    return bytes([0x16, 3, 1]) + struct.pack("!H", len(handshake)) + handshake
+
+
+HTTP_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nhello world\n"
+)
+CLIENT_HELLO = client_hello(
+    "example.com",
+    [0x2A2A, 0x0304, 0x0303],
+    [
+        0x0A0A,  # GREASE
+        0x1301,
+        0x1302,
+        0x1303,
+        0xC02B,
+        0xC02F,
+        0xC02C,
+        0xC030,
+        0xCCA9,
+        0xCCA8,
+        0xC013,
+        0xC014,
+        0x009C,
+        0x009D,
+        0x002F,
+        0x0035,
+    ],
+)
+
+
 def generate() -> list[Packet]:
     """Fixed, deterministic traffic: every protocol appears at least once."""
     ip = ipv4_packet
+    query = dns_query(0x4321, "example.com", 28)
+    tcp_dns = len(query).to_bytes(2) + query  # DNS over TCP: 2-byte length prefix
     dns_like = bytes.fromhex("beef01000001000000000000") + b"\x07example\x03com\x00\x00\x01\x00\x01"
     frames = [
         eth_frame(MAC_BROADCAST, MAC_A, ETHERTYPE_ARP, arp_packet(1, MAC_A, IP_A, MAC_ZERO, IP_B)),
@@ -246,6 +322,60 @@ def generate() -> list[Packet]:
             ETHERTYPE_IPV6,
             ipv6_packet(IP6_A, IP6_B, 17, udp_datagram(IP6_A, IP6_B, 53002, 53, dns_like)),
         ),
+        # Application layer (stage 2): DNS query and CNAME answer, DNS over TCP, an HTTP
+        # response, and a TLS ClientHello.
+        eth_frame(
+            MAC_B,
+            MAC_A,
+            ETHERTYPE_IPV4,
+            ip(
+                IP_A,
+                IP_B,
+                17,
+                udp_datagram(IP_A, IP_B, 53003, 53, dns_query(0x1234, "www.example.com")),
+            ),
+        ),
+        eth_frame(
+            MAC_A,
+            MAC_B,
+            ETHERTYPE_IPV4,
+            ip(IP_B, IP_A, 17, udp_datagram(IP_B, IP_A, 53, 53003, dns_cname_response())),
+        ),
+        eth_frame(
+            MAC_B,
+            MAC_A,
+            ETHERTYPE_IPV4,
+            ip(
+                IP_A,
+                IP_B,
+                6,
+                tcp_segment(IP_A, IP_B, 42000, 53, 1, 1, tcp.PSH | tcp.ACK, payload=tcp_dns),
+            ),
+        ),
+        eth_frame(
+            MAC_A,
+            MAC_B,
+            ETHERTYPE_IPV4,
+            ip(
+                IP_B,
+                IP_A,
+                6,
+                tcp_segment(
+                    IP_B, IP_A, 80, 40000, 5001, 1041, tcp.PSH | tcp.ACK, payload=HTTP_RESPONSE
+                ),
+            ),
+        ),
+        eth_frame(
+            MAC_B,
+            MAC_A,
+            ETHERTYPE_IPV4,
+            ip(
+                IP_A,
+                IP_B,
+                6,
+                tcp_segment(IP_A, IP_B, 43000, 443, 1, 1, tcp.PSH | tcp.ACK, payload=CLIENT_HELLO),
+            ),
+        ),
     ]
     base_ns = 1_700_000_000 * 1_000_000_000  # 2023-11-14 22:13:20 UTC
     return [Packet(base_ns + i * 1_000_000, len(f), f) for i, f in enumerate(frames)]
@@ -253,7 +383,7 @@ def generate() -> list[Packet]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate a synthetic pcap covering every Stage 1 protocol"
+        description="Generate a synthetic pcap covering every supported protocol"
     )
     parser.add_argument("output", type=Path, help="pcap file to write")
     args = parser.parse_args(argv)

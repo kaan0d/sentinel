@@ -17,3 +17,10 @@ class Layer:
     payload: bytes = b""
     error: str | None = None
     anomalies: tuple[str, ...] = ()
+
+
+def printable(data: bytes) -> str:
+    """Attacker-controlled bytes as a string that is safe to print: everything outside
+    printable ASCII becomes a backslash-x escape, so control and escape sequences cannot
+    reach a terminal."""
+    return "".join(chr(b) if 0x20 <= b < 0x7F else f"\\x{b:02x}" for b in data)

@@ -2,18 +2,24 @@ import random
 
 from sentinel.proto.arp import Arp
 from sentinel.proto.decode import decode
+from sentinel.proto.dns import Dns
 from sentinel.proto.ethernet import Ethernet
+from sentinel.proto.http import Http
 from sentinel.proto.icmp import Icmp
 from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.ipv6 import IPv6
 from sentinel.proto.tcp import Tcp
+from sentinel.proto.tls import TlsClientHello
 from sentinel.proto.udp import Udp
 from sentinel.summary import describe
 from tools.gen_pcap import (
+    CLIENT_HELLO,
     IP_A,
     IP_B,
     MAC_A,
     MAC_B,
+    client_hello,
+    dns_query,
     eth_frame,
     generate,
     ipv4_packet,
@@ -30,12 +36,17 @@ EXPECTED_LAYERS = [
     (Ethernet, IPv4, Tcp),
     (Ethernet, IPv4, Tcp),
     (Ethernet, IPv4, Tcp),
+    (Ethernet, IPv4, Tcp, Http),
     (Ethernet, IPv4, Tcp),
-    (Ethernet, IPv4, Tcp),
-    (Ethernet, IPv4, Udp),
-    (Ethernet, IPv4, Udp),
+    (Ethernet, IPv4, Udp, Dns),
+    (Ethernet, IPv4, Udp, Dns),
     (Ethernet, IPv6, Tcp),
-    (Ethernet, IPv6, Udp),
+    (Ethernet, IPv6, Udp, Dns),
+    (Ethernet, IPv4, Udp, Dns),
+    (Ethernet, IPv4, Udp, Dns),
+    (Ethernet, IPv4, Tcp, Dns),
+    (Ethernet, IPv4, Tcp, Http),
+    (Ethernet, IPv4, Tcp, TlsClientHello),
 ]
 
 
@@ -117,3 +128,59 @@ def test_byte_corruption_never_raises() -> None:
 def test_decode_is_deterministic() -> None:
     for packet in generate():
         assert decode(packet.data) == decode(packet.data)
+
+
+def tcp_frame(sport: int, dport: int, payload: bytes) -> bytes:
+    seg = tcp_segment(IP_A, IP_B, sport, dport, 1, 1, 0x18, payload=payload)
+    return eth_frame(MAC_B, MAC_A, 0x0800, ipv4_packet(IP_A, IP_B, 6, seg))
+
+
+def test_http_and_tls_are_found_by_content_not_port() -> None:
+    http = decode(tcp_frame(50000, 8080, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+    assert isinstance(http[-1], Http)
+    tls = decode(tcp_frame(50000, 8443, CLIENT_HELLO))
+    assert isinstance(tls[-1], TlsClientHello)
+
+
+def test_other_tcp_payloads_get_no_application_layer() -> None:
+    layers = decode(tcp_frame(50000, 8080, b"\x00\x01binary"))
+    assert tuple(type(layer) for layer in layers) == (Ethernet, IPv4, Tcp)
+
+
+def test_tcp_dns_split_across_segments_is_left_alone() -> None:
+    query = dns_query(7, "example.com")
+    prefixed = len(query).to_bytes(2) + query
+    whole = decode(tcp_frame(50000, 53, prefixed))
+    dns = whole[-1]
+    assert isinstance(dns, Dns)
+    assert dns.questions[0].name == "example.com"
+    for cut in (1, 2, 10, len(prefixed) - 1):  # needs stream reassembly (stage 3)
+        assert isinstance(decode(tcp_frame(50000, 53, prefixed[:cut]))[-1], Tcp)
+
+
+def test_application_errors_and_anomalies_show_up_in_the_summary() -> None:
+    frame = eth_frame(
+        MAC_B,
+        MAC_A,
+        0x0800,
+        ipv4_packet(IP_A, IP_B, 17, udp_datagram(IP_A, IP_B, 5000, 53, b"xyz")),
+    )
+    line = describe(decode(frame), len(frame))
+    assert line.endswith("[error: truncated dns header: 3 of 12 bytes]")
+    cut = decode(tcp_frame(50000, 443, CLIENT_HELLO)[:120])
+    assert "[truncated client hello:" in describe(cut, 200)
+
+
+def test_snaplen_cut_client_hello_gives_no_false_checksum_anomaly() -> None:
+    layers = decode(tcp_frame(50000, 443, CLIENT_HELLO)[:120])
+    assert [a for layer in layers for a in layer.anomalies if "checksum" in a] == []
+
+
+def test_summary_never_prints_control_characters() -> None:
+    payload = b"GET /a\x1b[2J HTTP/1.1\r\nHost: \x07\x1b]0;pwned\x07\r\n\r\n"
+    frame = tcp_frame(50000, 80, payload)
+    line = describe(decode(frame), len(frame))
+    assert line.isprintable()
+    assert "\\x1b" in line
+    hello = client_hello("a\x1b[31m.test", [0x0304], [0x1301])
+    assert describe(decode(tcp_frame(50000, 443, hello)), 300).isprintable()
