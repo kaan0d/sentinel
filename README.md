@@ -4,7 +4,7 @@
 
 Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
 
-Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. The row for stage 12 is only a plan, and it can change.
+Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. Stage 12 was a plan that said "if it turns out to be reliable", and it is the last one for now.
 
 Write-ups, one per series:
 
@@ -26,7 +26,7 @@ Write-ups, one per series:
 | 9 | Compare with `tshark` on generated and public sample captures, and fix every difference | done |
 | 10 | Two more detectors: SSH brute force, ICMP tunneling | done |
 | 11 | TLS fingerprint (JA3) from the ClientHello, and a `ja3` filter | done |
-| 12 | Live capture on Windows, IP level only, if it turns out to be reliable | maybe |
+| 12 | Live capture on Windows: IPv4 only, no Npcap | done |
 
 ## Install
 
@@ -151,7 +151,7 @@ python -m sentinel ids attacks.pcap --rules rules/
 
 The same capture with `--format json` (the default) gives one object per alert with the fields `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence`. `python tools/gen_pcap.py --benign benign.pcap` writes busy but harmless traffic, and `ids` prints nothing for it.
 
-Capture from a network interface (Linux, needs root, listens only). Use it only on a network you own or may monitor:
+Capture from a network interface (Linux as root, Windows as Administrator; it listens only). Use it only on a network you own or may monitor:
 
 ```
 sudo python -m sentinel live eth0
@@ -161,14 +161,20 @@ sudo python -m sentinel live eth0 --ids --format text
 
 The first prints the same lines as `read`, as the packets arrive. The last runs the detectors and prints each alert when it is raised. Ctrl-C stops the capture, and a summary line goes to stderr: `# 812 packets, 3 dropped by the kernel`.
 
+On Windows, from an Administrator prompt, the interface is named by its IPv4 address (the one `ipconfig` shows; `127.0.0.1` is the loopback). Only IPv4 is captured, see Stage 12:
+
+```
+python -m sentinel live 192.168.1.20 --filter "tcp and port 443" --duration 60
+```
+
 ## Results
 
 | What | Result |
 |------|--------|
-| Tests | 895 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
-| CI | GitHub Actions, 5 jobs green: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests as root on an Ubuntu runner (a real packet socket on the loopback interface) |
-| Sabotage | 381 deliberate one-line breaks of the code, every one caught by the tests |
-| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 11): 0 failures |
+| Tests | 942 pass here, 6 more need Linux and root and 5 more need Windows and Administrator rights; ruff and strict mypy are clean |
+| CI | GitHub Actions: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests on a real interface as root on Ubuntu (green) and as Administrator on Windows (added in stage 12, not run on GitHub yet) |
+| Sabotage | 405 deliberate one-line breaks of the code, every one caught by the tests |
+| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 12): 0 failures |
 | tshark | 10 captures (6 public ones from other people's networks), 2,987 packets, 68,756 field values compared with Wireshark's `tshark`: 0 unexplained differences, after 3 bugs found in Sentinel and fixed |
 | Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
 | Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
@@ -460,6 +466,33 @@ python -m sentinel read capture.pcap --filter "ja3 61279becc80ab0e3aca57f5913c3e
 
 **What it does not show.** Only the client side: no JA3S for the server hello, and no JA4. JA3 depends on the order of the extensions, and some clients now shuffle it on every connection, so their JA3 changes each time. A fingerprint tells software apart; it does not name a program or a person. All of it was tested on hellos I built, and on none that a real browser sent, because no TLS capture of one was available here.
 
+## Stage 12: live capture on Windows
+
+The plan for this stage said "if it turns out to be reliable", so the first thing was to find out. Windows has no packet socket like Linux's `AF_PACKET`. It has a raw socket that can be switched to receive everything (`SIO_RCVALL`) and then gets the IPv4 packets that cross one interface. It needs an Administrator prompt and nothing installed. (Wireshark uses Npcap, a driver. It gives more, but it is a dependency, and this project has none.)
+
+```
+python -m sentinel live 192.168.1.136 --duration 5 --filter "tcp and host 192.168.1.1"
+```
+
+The interface is named by its IPv4 address, the one `ipconfig` prints (`127.0.0.1` for the loopback), because `bind` needs one and Windows has no `/sys/class/net`. Everything after the socket is the pipeline of stage 6: decode, filter, print or run the detectors, `--write`, `--count`, `--duration`, the same exit codes. A name that is not an IPv4 address is an error that says how to name an interface; a missing Administrator token says `live capture needs an Administrator prompt`.
+
+**Is it reliable?** I measured before writing the code, on this machine, from an elevated prompt (its Ethernet interface, its router on the same network, and 127.0.0.1):
+
+- Every packet arrived once, in both directions: a datagram to the machine itself, a datagram to the router, a ping and its reply, a TCP connection to the router. On the loopback address a datagram arrived once (Linux's packet socket gives two copies there).
+- The packets are whole IP packets, from the IP header on, and the length in the header was the length received for all 66 packets of the first try. The TCP checksum of the packets this machine sent was the unfinished sum that the network card completes (Stage 9 recognises it), and of the ones that came in, right: none of the 87 packets of a real run of Sentinel (below) is reported as having a bad checksum.
+- A datagram larger than the MTU arrived in pieces, not put back together: the first fragment (1,500 bytes, more-fragments bit set) of two datagrams was seen. The later fragments were not looked at.
+- IPv6: the socket opens, but a ping and a datagram to `::1` delivered nothing, so it is IPv4 only.
+- **The order between the two directions is not the wire order.** In every TCP connection I looked at (7), the ACK that completes the handshake came before the SYN-ACK it answers: `S out, A out, SA in, ...`. The order inside one direction is right. The packet that comes in is handed to the socket after the machine has answered it; I measured this and did not find out why. The time in a line is the time of reading, so the two lines show that order too (the ACK 84 microseconds before the SYN-ACK in one run). `flows` on a saved capture still gets the connection right (4 packets out, 3 in, closed), and the detectors follow the client's own packets (the SYN-flood detector waits for the ACK of the client, which does come after its SYN), but a person reading the lines will see it.
+- Windows does not report dropped packets, so a slow run can lose some and say nothing.
+
+**In the program.** `IpSocket` wraps the raw socket and puts a 14-byte Ethernet header in front of each packet: both addresses zero (a made-up MAC address would look like data), the ethertype 0x86DD if the version nibble is 6 and 0x0800 otherwise. What is not IPv4 or IPv6 goes to the IPv4 parser, which refuses it with a message, so nothing is dropped or raises. A file written with `--write` therefore has Ethernet frames with all-zero addresses. `open_capture` picks the Linux socket if the system has `AF_PACKET` and the Windows one if it has `SIO_RCVALL`, and refuses otherwise. `kernel_drops()` says nothing on Windows, as it does on any system that does not report drops.
+
+**Tried once, for real.** `live 192.168.1.136 -w out.pcap --duration 5` from an elevated prompt, while the machine opened two connections to the router, sent a datagram and a ping, captured 87 packets (the rest was the machine's other traffic). `read` on the file printed the same 87 lines. The connections came out as `closed, pkts 4/3` in `flows`, and `ids` said nothing.
+
+**Tests.** 942 run here (47 new). 5 more run only on Windows as Administrator (`tests/test_live_windows.py`: a datagram to `127.0.0.1` captured, decoded and seen exactly once, a TCP conversation on loopback with its payload once in each direction, the command line saving a datagram, an address no interface has), and 1 only without Administrator rights (the error message); the run of that file passed 8 times in a row here. `tests/test_live_ip.py` (45) uses a stand-in for the socket and runs everywhere: the header and the ethertype for every version nibble, an empty read, 2,000 random reads decoding without raising, every IP packet of the four generated captures coming back identical above Ethernet and printing the same `read` line, the opening of the socket with each error and its message (and the socket closed after it), the names accepted and refused, and a run of 150 handshakes in the order Windows delivers them, which raises no SYN-flood alert, while the same SYNs with no ACK do. CI has a sixth job that runs the Windows file as Administrator and fails if those tests were skipped (`tests/test_ci.py` checks it); it has not run on GitHub yet, so what a runner does on its loopback address is not known. Sabotage: 24 new one-line breaks (405 in all), every one caught in the end. One old break survived the first run, a stage 7 one that takes Windows out of the CI matrix: the test only looked for the word `windows-latest`, and the new job contains it. The test now checks the matrix line itself. Fuzzing: 3,000,000 inputs (seed 12), 0 failures.
+
+**What it does not show.** IPv6, Ethernet addresses, a drop count, promiscuous mode, Wi-Fi monitor mode, an interface named by anything but its address. The order problem cannot be repaired: the timestamps are taken at reading, so there is nothing to sort by. Only one Windows machine, one Windows version and one network were tried, and none of the tests ran on a busy link.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -473,9 +506,9 @@ python -m sentinel read capture.pcap --filter "ja3 61279becc80ab0e3aca57f5913c3e
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN, and only the JA3 fingerprint (no JA3S for the server hello, no JA4).
 - IDS: rules are TOML only (no YAML). `ssh_brute_force` counts completed connections and cannot see failed logins; `icmp_tunnel` reads IPv4 only and only messages captured whole, so a short snap length hides large requests. Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose. A false positive on real traffic, found in stage 10 and not fixed: the public `dns.cap` raises one `dns-tunnel` alert for an Active Directory lookup, `_ldap._tcp.05b5292b-34b8-4fb7-85a3-8beef5fd2069.domains._msdcs.utelsystems.local`, whose GUID label reads as random.
-- Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
+- Live capture on Linux: only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). On Windows see Stage 12: IPv4 only, no Ethernet header, no drop count, and packets of the two directions are not in wire order. The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
-- Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Only synthetic traffic, and no real network apart from the loopback test.
+- Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Everything but live capture was tested on synthetic traffic and on public captures; the live capture was tried on the loopback interface (Linux, in CI) and on the Ethernet interface of the machine I developed it on (Windows, stage 12), and never on a busy network.
 - Speed: pure Python, one core. The `live` loop handles roughly 30,000 small packets per second on the machine above, so a busy network will make the kernel drop packets.
 - The fuzzer only checks that nothing raises and that output is well formed. It cannot tell a wrong parse from a right one.
 
@@ -487,7 +520,7 @@ sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http
 sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
 sentinel/filter/   filter language: lexer, parser, evaluator
 sentinel/ids/      IDS engine: detectors, sliding window, rule loading, alerts
-sentinel/live/     live capture from a Linux packet socket
+sentinel/live/     live capture: a Linux packet socket, or a Windows raw socket
 rules/             default.toml, one rule per detector
 sentinel/summary.py  tcpdump-style line formatting
 sentinel/cli.py    command line entry point
@@ -495,7 +528,7 @@ tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writ
 tools/bench.py     benchmarks: packets per second for every stage
 tools/fuzz.py      fuzzer: damaged packets and capture files through the whole pipeline
 tools/compare_tshark.py  compares Sentinel's decoding with tshark's (needs Wireshark)
-.github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root
+.github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root and as Administrator
 tests/             pytest tests
 LICENSE            MIT
 ```

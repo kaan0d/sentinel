@@ -181,9 +181,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     live = commands.add_parser(
         "live",
-        help="capture from a network interface (Linux, needs root); only on a network you own",
+        help="capture from a network interface (Linux as root, Windows as Administrator);"
+        " only on a network you own",
     )
-    live.add_argument("interface", help="for example eth0, or lo")
+    live.add_argument(
+        "interface", help="for example eth0 or lo; on Windows the IPv4 address of the interface"
+    )
     live.add_argument("--write", "-w", type=Path, metavar="FILE", help="also save a pcap file")
     live.add_argument("--count", "-c", type=_positive_int, help="stop after this many packets")
     live.add_argument("--duration", type=_positive_seconds, help="stop after this many seconds")

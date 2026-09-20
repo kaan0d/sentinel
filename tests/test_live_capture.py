@@ -263,5 +263,6 @@ def test_open_capture_checks_the_interface_before_it_opens_a_socket(
 
 def test_open_capture_on_a_system_without_packet_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delattr(socket, "AF_PACKET", raising=False)
+    monkeypatch.delattr(socket, "SIO_RCVALL", raising=False)
     with pytest.raises(LiveError, match="needs Linux"):
         open_capture("eth0")
