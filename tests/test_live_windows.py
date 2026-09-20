@@ -59,7 +59,10 @@ def test_a_datagram_sent_to_loopback_is_captured_and_decoded() -> None:
             if udp is not None and udp.payload == marker:
                 ip = next(layer for layer in layers if isinstance(layer, IPv4))
                 assert (str(ip.src), str(ip.dst), udp.dst_port) == ("127.0.0.1", "127.0.0.1", 40444)
-                assert not ip.anomalies
+                # A GitHub runner (Windows Server 2025) hands out loopback packets whose IPv4 header
+                # checksum is still 0, left to the network card; this machine fills it in.
+                assert ip.anomalies in ((), ("bad ipv4 header checksum",))
+                assert ip.anomalies == () or ip.checksum == 0
                 assert abs(packet.ts_ns - time.time_ns()) < 10_000_000_000
                 break
         else:
