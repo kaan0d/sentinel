@@ -4,12 +4,13 @@
 
 Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
 
-Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. Stage 12 was a plan that said "if it turns out to be reliable", and it is the last one for now.
+Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. Stage 12 was a plan that said "if it turns out to be reliable". Stage 13 changes no code: it runs the detectors on real captures, and it is the last one for now.
 
 Write-ups, one per series:
 
 - [Part 1: writing a packet analyzer from scratch](https://kaan0d.github.io/posts/sentinel-packet-analyzer) (stages 1 to 7)
-- [Part 2: taking Sentinel to the next level](https://kaan0d.github.io/posts/sentinel-next-level) (stage 8 on)
+- [Part 2: taking Sentinel to the next level](https://kaan0d.github.io/posts/sentinel-next-level) (stages 8 to 12)
+- [Part 3: Sentinel meets real traffic](https://kaan0d.github.io/posts/sentinel-real-world) (stage 13)
 
 ## Status
 
@@ -27,6 +28,7 @@ Write-ups, one per series:
 | 10 | Two more detectors: SSH brute force, ICMP tunneling | done |
 | 11 | TLS fingerprint (JA3) from the ClientHello, and a `ja3` filter | done |
 | 12 | Live capture on Windows: IPv4 only, no Npcap | done |
+| 13 | Real traffic: the detectors on real attack captures and on a slice of a 1 Gbps backbone, checked against `tshark` (no code changed) | done |
 
 ## Install
 
@@ -176,7 +178,8 @@ python -m sentinel live 192.168.1.20 --filter "tcp and port 443" --duration 60
 | Sabotage | 405 deliberate one-line breaks of the code, every one caught by the tests |
 | Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 12): 0 failures |
 | tshark | 10 captures (6 public ones from other people's networks), 2,987 packets, 68,756 field values compared with Wireshark's `tshark`: 0 unexplained differences, after 3 bugs found in Sentinel and fixed |
-| Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
+| Real traffic | 2,716,636 packets in 7 captures made by other people (211 MB): the detector for the attack fired on all 5 attack captures. On the 2 captures nobody labelled (a week at a web server, and 14.6 s of a 1 Gbps backbone) a recount from `tshark`'s output found the same scanning sources as Sentinel (16 and 376), none missed and none added; 165 DNS alerts on the backbone are probably false alarms. No code changed (Stage 13) |
+| Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5); 50,394 through the detectors on the backbone slice, a third of the link's own rate |
 | Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
 
 ## Stage 1: pcap I/O and L2-L4 parsers
@@ -493,6 +496,53 @@ The interface is named by its IPv4 address, the one `ipconfig` prints (`127.0.0.
 
 **What it does not show.** IPv6, Ethernet addresses, a drop count, promiscuous mode, Wi-Fi monitor mode, an interface named by anything but its address. The order problem cannot be repaired: the timestamps are taken at reading, so there is nothing to sort by. Only one Windows machine, one Windows version and one network were tried, and none of the tests ran on a busy link.
 
+## Stage 13: real traffic
+
+Until now every detector had been tried on traffic I generated and on a few small public files. This stage runs them on real captures: attacks made by other people, and ordinary traffic that nobody labelled. No code was changed. The built-in rules were used as they are, so the tests, the sabotage run and the fuzzing of stage 12 still stand. The numbers below come from `developing/eval_run.py` and `developing/eval_review.py`, which need the captures and `tshark`. The captures are other people's traffic and stay outside the repository.
+
+**The captures** (7 files, 2,716,636 packets, 211 MB):
+
+| Capture | What it is | Packets | Source |
+|---------|------------|---------|--------|
+| `pkt.TCP.synflood.spoofed.pcap` | a real spoofed SYN flood: only SYNs, from 37,623 different addresses, in 23.7 s | 37,841 | [StopDDoS/packet-captures](https://github.com/StopDDoS/packet-captures) (L.F. Haaijer, 2022) |
+| `pkt.TCP.DOMINATE.syn.ecn.cwr.pcapng` | a SYN flood with the ECN and CWR flags set (a classic pcap file despite the name) | 9,878 | the same |
+| `arpspoofing.pcap` | ARP spoofing on a small LAN | 1,887 | [vivekseth/cs3](https://github.com/vivekseth/cs3), a course repository that does not say where the file comes from |
+| `portscan.pcap` | one host sends 1,365 SYNs to 1,000 different ports of another | 2,401 | the same |
+| `dns-tunnel-iodine.pcap` | a DNS tunnel made by iodine | 438 | [elastic/examples](https://github.com/elastic/examples) |
+| 2026-08-07, "seven days of scans and probes" | what reaches a web server on the internet for a week | 500,923 | [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net/2026/08/07/index.html) |
+| MAWI samplepoint-F, 2025-01-01 14:00 | the first 14.6 s of a 1 Gbps backbone link (the first 60 MiB of the compressed file, fetched with a range request); the packets are cut to 96 bytes | 2,163,268 | [mawi.wide.ad.jp](https://mawi.wide.ad.jp/mawi/) (WIDE project, research use only) |
+
+I checked what is inside the two cs3 files with `tshark`: in the ARP file one MAC address (7c:d1:c3:94:9e:b8) answers for both the gateway, 192.168.0.1, and 192.168.0.103; in the other, 192.168.0.100 sends SYNs to 1,000 different ports of 192.168.0.101.
+
+Not used: CIC-IDS2017 (50 GB and a registration form), Kitsune (19 GB in one zip that the server will not hand over in parts; its 2 GB files are feature tables, not captures) and CTU-13 (its pcap files hold only the botnet's own traffic). The labels of the files I used are per file ("this is a SYN flood"), not per packet.
+
+**Do the detectors fire on real attacks?** Yes, on all five:
+
+| Capture | Alerts | Time |
+|---------|--------|------|
+| spoofed SYN flood | 4 `syn-flood` | 1.2 s |
+| SYN flood with ECN and CWR | 1 `syn-flood` | 0.3 s |
+| ARP spoofing | 5 `arp-spoof` | 0.05 s |
+| port scan | 5 `port-scan` | 0.06 s |
+| iodine tunnel | 3 `dns-tunnel` | 0.02 s |
+
+That is all this shows: the two StopDDoS files hold only attack traffic, so they cannot show a false alarm, and one file of each kind says nothing about how many attacks would be missed.
+
+**Traffic that nobody labelled.** Nobody can say which packets of a backbone are attacks, so the alerts are not scored as right or wrong. `developing/eval_review.py` asks `tshark` two things instead: is what an alert says true (the same count of ports, hosts, SYNs or NXDOMAIN answers, recounted from `tshark`'s own output), and does an independent recount of the same rule find scanners that Sentinel did not report?
+
+- *A week at a web server* (604,798 s): 27 `port-scan` alerts, all of one source probing 15 or more ports of one host, and 1 `dns-tunnel` alert (a random-looking name under `icann.org`; not looked into). `tshark` counts the same number of ports for all 27, and the recount finds the same 16 scanning sources: none missed, none added.
+- *A 1 Gbps backbone* (14.6 s, 2,163,268 packets): 795 alerts. `port-scan`: 627 alerts from 376 sources, and the recount finds the same 376. Of the 626 alerts that SYNs can be counted for, all 626 reach the rule's threshold in `tshark`'s count and 551 have exactly the same number; in the others the recount is higher, which fits a limit in the code (I did not follow each one): a window keeps at most 4 times the threshold in events, so `hosts` in an alert is between 30 and 120 (443 of the 624 say 30) whatever the size of the sweep. The most probed ports were 4117, 23, 22, 80, 443, 34567, 8080 and 2222. The 627th alert is not a scan: it says `19629 packets were not tracked: the detector's state limit was reached`. One table of the port-scan detector reached its 100,000 keys (a source with a host, or a source with a port, seen within the last 10 s), and Sentinel says so, as it was made to. The recount found no scanning source that it had failed to report. The file ends inside a packet (it is the first part of a bigger one), which is reported as `truncated pcap record: 72 of 86 bytes` after every whole packet has been read.
+- `dns-tunnel` on the backbone: 165 alerts, all of the NXDOMAIN check (20 "no such name" answers to one client within 60 s). `tshark` confirms all 165, and shows 31,006 NXDOMAIN answers to 1,815 clients in the 14.6 s, one client with 757. None of the other signals (a long name, entropy, many subdomains) fired. I read these as false alarms of a check that was made for one client, on a link where the clients are resolvers and gateways, but without labels I cannot say so.
+- `syn-flood` on the backbone: 3 alerts, all for 131.112.115.241 port 993 (IMAPS): 100 SYNs from 16, 18 and 22 addresses within one second, and `tshark` counts the same. In the whole slice 844 SYNs from 110 addresses went to that port, and no SYN-ACK from it was captured. That could be an attack, or clients retrying against a server that is down; nothing in the capture says which.
+
+**A mistake of mine.** The first recount said that Sentinel had missed a scanner, 202.121.34.125. It was a router. Its packets were ICMP errors that quote the refused SYN, and my `tshark` filter counted the SYN inside the quote as if the router had sent it. Sentinel does not, and was right. The filter now excludes ICMP.
+
+**Speed.** 50,394 packets/s on the backbone slice (35,073 on the week at the web server and 30,618 on the SYN flood), on the machine of the stage 7 benchmarks. The link carried about 148,000 packets/s, so Sentinel ran at a third of real time.
+
+**What it does not show.** How many packets of an attack it got right, and a false alarm rate: the labels are per file and the two big captures have none. What the alerts say is true of the packets, and whether each one is an attack is another question. One 14.6 s slice of one link and one week at one server. The backbone is not symmetric: only 5.3% of the SYNs have a SYN-ACK in the capture (57.5% for port 443), so "unanswered" cannot be read as "a scan", and a detector that waits for the handshake sees half of it. One ARP spoofing file, one iodine capture, and no SYN flood with ordinary traffic in it. Where the cs3 files come from is not known.
+
+**Found and kept** (limits, not fixed; each is in Limits): the NXDOMAIN threshold on a link of resolvers, the state limit of the detectors on a backbone, and the cap on the counts in a port-scan alert.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -506,9 +556,10 @@ The interface is named by its IPv4 address, the one `ipconfig` prints (`127.0.0.
 - VLAN tags keep the VLAN id and drop the priority bits.
 - HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN, and only the JA3 fingerprint (no JA3S for the server hello, no JA4).
 - IDS: rules are TOML only (no YAML). `ssh_brute_force` counts completed connections and cannot see failed logins; `icmp_tunnel` reads IPv4 only and only messages captured whole, so a short snap length hides large requests. Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose. A false positive on real traffic, found in stage 10 and not fixed: the public `dns.cap` raises one `dns-tunnel` alert for an Active Directory lookup, `_ldap._tcp.05b5292b-34b8-4fb7-85a3-8beef5fd2069.domains._msdcs.utelsystems.local`, whose GUID label reads as random.
+- Real traffic (stage 13): on a 1 Gbps backbone slice the `dns-tunnel` NXDOMAIN check raised 165 alerts that are probably resolvers and gateways, not tunnels (threshold 20 answers in 60 s), the port-scan detector reached its state limit of 100,000 keys (19,629 packets not tracked, and it says so), and the `hosts` and `ports` counts in a port-scan alert are capped at 4 times the threshold, so a fast sweep is reported at 30 to 120 hosts. Only about a third of the link's packet rate is processed. Not measured: a per-packet false alarm or miss rate.
 - Live capture on Linux: only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). On Windows see Stage 12: IPv4 only, no Ethernet header, no drop count, and packets of the two directions are not in wire order. The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
-- Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Everything but live capture was tested on synthetic traffic and on public captures; the live capture was tried on the loopback interface (Linux, in CI) and on the Ethernet interface of the machine I developed it on (Windows, stage 12), and never on a busy network.
+- Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Everything but live capture was tested on synthetic traffic and on public captures (in stage 13 the detectors also ran on real attack captures and on 14.6 s of a 1 Gbps backbone, with nobody's labels); the live capture was tried on the loopback interface (Linux, in CI) and on the Ethernet interface of the machine I developed it on (Windows, stage 12), and never on a busy network.
 - Speed: pure Python, one core. The `live` loop handles roughly 30,000 small packets per second on the machine above, so a busy network will make the kernel drop packets.
 - The fuzzer only checks that nothing raises and that output is well formed. It cannot tell a wrong parse from a right one.
 
