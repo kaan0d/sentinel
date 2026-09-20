@@ -4,7 +4,12 @@
 
 Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
 
-Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. The rows for stages 9 to 12 are the plan, and it can change.
+Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. The row for stage 12 is only a plan, and it can change.
+
+Write-ups, one per series:
+
+- [Part 1: writing a packet analyzer from scratch](https://kaan0d.github.io/posts/sentinel-packet-analyzer) (stages 1 to 7)
+- [Part 2: taking Sentinel to the next level](https://kaan0d.github.io/posts/sentinel-next-level) (stage 8 on)
 
 ## Status
 
