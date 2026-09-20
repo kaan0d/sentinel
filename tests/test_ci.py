@@ -60,8 +60,8 @@ def test_the_workflow_covers_the_python_versions_and_systems_the_project_claims(
     minimum = pyproject["project"]["requires-python"].removeprefix(">=")
     assert f'"{minimum}"' in WORKFLOW  # the oldest version it says it supports
     assert '"3.13"' in WORKFLOW  # the one the author uses
-    assert "ubuntu-latest" in WORKFLOW
-    assert "windows-latest" in WORKFLOW  # where it is developed
+    # the matrix itself: another job that runs on Windows must not make up for a missing entry
+    assert "os: [ubuntu-latest, windows-latest]" in WORKFLOW  # windows is where it is developed
 
 
 def test_the_workflow_runs_the_tests_that_need_a_real_interface_as_root() -> None:
@@ -69,6 +69,15 @@ def test_the_workflow_runs_the_tests_that_need_a_real_interface_as_root() -> Non
     assert "needs Linux and root" in WORKFLOW  # a skip in that job is a failure
     live = (ROOT / "tests" / "test_live_linux.py").read_text(encoding="utf-8")
     assert '"needs Linux and root"' in live.replace("reason=", "")
+
+
+def test_the_workflow_runs_the_tests_that_need_a_real_interface_as_administrator() -> None:
+    job = WORKFLOW.split("  live-capture-windows:", 1)[1]
+    assert "runs-on: windows-latest" in job
+    assert "python -m pytest tests/test_live_windows.py" in job
+    assert "needs Windows and Administrator rights" in job  # a skip in that job is a failure
+    live = (ROOT / "tests" / "test_live_windows.py").read_text(encoding="utf-8")
+    assert '"needs Windows and Administrator rights"' in live.replace("reason=", "")
 
 
 def test_the_fuzz_seed_is_the_run_number() -> None:
