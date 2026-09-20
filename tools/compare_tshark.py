@@ -130,6 +130,7 @@ SCALARS: list[tuple[str, str, str]] = [
     ("tls.record_version", "tls.record.version", "int"),
     ("tls.client_version", "tls.handshake.version", "int"),
     ("tls.server_name", "tls.handshake.extensions_server_name", "str"),
+    ("tls.ja3", "tls.handshake.ja3", "str"),
 ]
 # tshark reports eth.type (the outer type: 0x8100 for a VLAN tag) and vlan.etype (the type
 # after each tag), and Sentinel reports the inner type once, so those are combined below.
@@ -152,6 +153,8 @@ LISTS: list[tuple[str, str, str]] = [
     ("tls.ciphers", "tls.handshake.ciphersuite", "[int]"),
     ("tls.versions", "tls.handshake.extensions.supported_version", "[int]"),
     ("tls.extensions", "tls.handshake.extension.type", "[int]"),
+    ("tls.groups", "tls.handshake.extensions_supported_group", "[int]"),
+    ("tls.point_formats", "tls.handshake.extensions_ec_point_format", "[int]"),
 ]
 EXTRA = [("eth.type", "eth.type", "int"), ("vlan.etype", "vlan.etype", "[int]")]
 KINDS = {key: kind for key, _field, kind in SCALARS + LISTS + EXTRA}
@@ -338,6 +341,12 @@ def ours(packet: Packet, layers: Sequence[Layer]) -> dict[str, Value]:
             r["tls.versions"] = list(tls.supported_versions)
         if tls.extensions:
             r["tls.extensions"] = list(tls.extensions)
+        if tls.supported_groups:
+            r["tls.groups"] = list(tls.supported_groups)
+        if tls.ec_point_formats:
+            r["tls.point_formats"] = list(tls.ec_point_formats)
+        if tls.ja3 is not None:
+            r["tls.ja3"] = tls.ja3
     return r
 
 

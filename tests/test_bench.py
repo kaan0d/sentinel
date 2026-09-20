@@ -27,7 +27,7 @@ STAGE_NAMES = [
     "read: decode and print a line",
     "filter: decode and match",
     "flows: decode, reassemble, print",
-    "ids: decode and run 4 detectors",
+    "ids: decode and run the default detectors",
     "live loop, printing lines",
     "live loop, running the detectors",
     "live loop, saving to a file",

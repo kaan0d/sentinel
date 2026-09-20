@@ -44,3 +44,26 @@ min_entropy_length = 40
 unique_subdomains = 50     # different subdomains of one domain within the window
 nxdomain_count = 20        # "no such name" answers to one client within the window
 window_seconds = 60.0
+
+# One client opening many connections to the SSH port of one server. SSH is encrypted, so failed
+# logins cannot be seen; what is seen is how often a client connects. Only connections that
+# complete the handshake count. Automation (backups, configuration tools) can look the same:
+# raise `connections`, or add a `filter` such as "not src host 10.0.0.5".
+[[rule]]
+id = "ssh-brute-force"
+detector = "ssh_brute_force"
+severity = "medium"
+port = 22                  # copy the rule with another id and port for a server on 2222
+connections = 10           # completed connections from one client to one server
+window_seconds = 60.0
+
+# Data carried in ping (ICMP echo, IPv4 only): many large requests, and replies that do not
+# repeat the data of their request (a real ping is answered with the data it sent).
+[[rule]]
+id = "icmp-tunnel"
+detector = "icmp_tunnel"
+severity = "medium"
+min_payload_bytes = 512    # a request with this much data or more is large (0 turns this check off)
+large_requests = 10        # large requests from one host to another within the window
+changed_replies = 5        # replies with other data than the request (0 turns this check off)
+window_seconds = 60.0

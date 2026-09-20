@@ -120,6 +120,8 @@ def _tls(t: TlsClientHello) -> str:
         parts.append(f"sni {t.server_name}")
     parts.append("versions [" + ", ".join(_version(v) for v in versions) + "]")
     parts.append(f"ciphers ({len(suites)}) [" + ", ".join(names + more) + "]")
+    if t.ja3 is not None:
+        parts.append(f"ja3 {t.ja3}")
     return ", ".join(parts)
 
 

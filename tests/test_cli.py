@@ -27,7 +27,7 @@ GOLDEN = """\
 2023-11-14 22:13:20.015000 IP 10.0.0.2.53 > 10.0.0.1.53003: UDP, length 63: DNS response 4660 NOERROR, A? www.example.com, answers [CNAME example.com, A 192.0.2.1]
 2023-11-14 22:13:20.016000 IP 10.0.0.1.42000 > 10.0.0.2.53: Flags [P.], seq 1, ack 1, win 64240, length 31: DNS query 17185, AAAA? example.com
 2023-11-14 22:13:20.017000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [P.], seq 5001, ack 1039, win 64240, length 77: HTTP: HTTP/1.1 200 OK
-2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more]
+2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
 """
 
 
@@ -39,13 +39,13 @@ tcp [2001:db8::1]:41000 > [2001:db8::2]:443: syn-sent, pkts 1/0, bytes 0/0, 0.00
 udp [2001:db8::1]:53002 > [2001:db8::2]:53: pkts 1/0, bytes 29/0, 0.000000s | -> DNS query 48879, A? example.com
 udp 10.0.0.1:53003 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS query 4660, A? www.example.com | <- DNS response 4660 NOERROR, A? www.example.com, answers [CNAME example.com, A 192.0.2.1]
 tcp 10.0.0.1:42000 > 10.0.0.2:53: midstream, pkts 1/0, bytes 31/0, 0.000000s [client stream start not captured] | -> DNS query 17185, AAAA? example.com
-tcp 10.0.0.1:43000 > 10.0.0.2:443: midstream, pkts 1/0, bytes 161/0, 0.000000s [client stream start not captured] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more]
+tcp 10.0.0.1:43000 > 10.0.0.2:443: midstream, pkts 1/0, bytes 161/0, 0.000000s [client stream start not captured] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
 # 8 flows, 14 packets in flows, 5 not in a flow
 """
 
 STREAM_FLOWS = """\
 tcp 10.0.0.1:44000 > 10.0.0.2:8080: closed, pkts 8/3, bytes 129/40, 0.010000s [1 retransmitted client segment] [1 out-of-order client segment] | -> HTTP: POST /upload HTTP/1.1, host files.test | <- HTTP: HTTP/1.1 200 OK
-tcp 10.0.0.1:45000 > 10.0.0.2:8443: established, pkts 4/1, bytes 161/0, 0.004000s [1 out-of-order client segment] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more]
+tcp 10.0.0.1:45000 > 10.0.0.2:8443: established, pkts 4/1, bytes 161/0, 0.004000s [1 out-of-order client segment] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
 tcp 10.0.0.1:46000 > 10.0.0.2:53: established, pkts 4/1, bytes 66/0, 0.004000s | -> DNS query 1, A? example.com | -> DNS query 2, AAAA? www.example.com
 tcp 10.0.0.1:47000 > 10.0.0.2:80: closing, pkts 5/1, bytes 160/0, 0.005000s [100 client bytes missing]
 tcp 10.0.0.1:48000 > 10.0.0.2:22: reset, pkts 1/1, bytes 0/0, 0.001000s
@@ -68,6 +68,9 @@ ATTACK_ALERTS_JSON = """\
 {"detector": "dns_tunnel", "dst": null, "evidence": {"domain": "evil-cdn.test", "name": "f2bnefn35c7je47372ve3rjtbgehkvyx3lfanxi7ldzb7j4b.t.evil-cdn.test", "signal": "many_subdomains", "subdomains": 50}, "message": "10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s", "rule": "dns-tunnel", "severity": "medium", "src": "10.0.5.5", "ts": "2023-11-14T22:13:52.450000Z", "ts_ns": 1700000032450000000}
 {"detector": "dns_tunnel", "dst": null, "evidence": {"length": 124, "longest_label": 45, "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...", "signal": "long_name"}, "message": "10.0.5.6 asked for a very long name under example.org (124 characters)", "rule": "dns-tunnel", "severity": "medium", "src": "10.0.5.6", "ts": "2023-11-14T22:13:55.000000Z", "ts_ns": 1700000035000000000}
 {"detector": "dns_tunnel", "dst": "10.0.6.6", "evidence": {"answers": 20, "signal": "nxdomain"}, "message": "10.0.6.6 received 20 'no such name' answers in 0.9s", "rule": "dns-tunnel", "severity": "medium", "src": null, "ts": "2023-11-14T22:13:56.951000Z", "ts_ns": 1700000036951000000}
+{"detector": "ssh_brute_force", "dst": "10.0.0.31", "evidence": {"connections": 10, "port": 22, "seconds": 0.9}, "message": "10.9.9.6 made 10 connections to the SSH port of 10.0.0.31 in 0.9s", "rule": "ssh-brute-force", "severity": "medium", "src": "10.9.9.6", "ts": "2023-11-14T22:14:00.902000Z", "ts_ns": 1700000040902000000}
+{"detector": "icmp_tunnel", "dst": "10.0.0.40", "evidence": {"replies": 5, "seconds": 0.8, "signal": "changed_reply"}, "message": "10.0.8.8 got 5 echo replies from 10.0.0.40 that do not repeat the data it sent, in 0.8s", "rule": "icmp-tunnel", "severity": "medium", "src": "10.0.8.8", "ts": "2023-11-14T22:14:05.850000Z", "ts_ns": 1700000045850000000}
+{"detector": "icmp_tunnel", "dst": "10.0.0.40", "evidence": {"bytes": 800, "requests": 10, "seconds": 1.8, "signal": "large_echo"}, "message": "10.0.8.8 sent 10 echo requests of 512 bytes or more to 10.0.0.40 in 1.8s", "rule": "icmp-tunnel", "severity": "medium", "src": "10.0.8.8", "ts": "2023-11-14T22:14:06.800000Z", "ts_ns": 1700000046800000000}
 """
 
 ATTACK_ALERTS_TEXT = """\
@@ -84,6 +87,9 @@ ATTACK_ALERTS_TEXT = """\
 2023-11-14T22:13:52.450000Z [medium] dns-tunnel: 10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s
 2023-11-14T22:13:55.000000Z [medium] dns-tunnel: 10.0.5.6 asked for a very long name under example.org (124 characters)
 2023-11-14T22:13:56.951000Z [medium] dns-tunnel: 10.0.6.6 received 20 'no such name' answers in 0.9s
+2023-11-14T22:14:00.902000Z [medium] ssh-brute-force: 10.9.9.6 made 10 connections to the SSH port of 10.0.0.31 in 0.9s
+2023-11-14T22:14:05.850000Z [medium] icmp-tunnel: 10.0.8.8 got 5 echo replies from 10.0.0.40 that do not repeat the data it sent, in 0.8s
+2023-11-14T22:14:06.800000Z [medium] icmp-tunnel: 10.0.8.8 sent 10 echo requests of 512 bytes or more to 10.0.0.40 in 1.8s
 """
 
 

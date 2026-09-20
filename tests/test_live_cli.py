@@ -220,7 +220,7 @@ def test_ids_prints_the_alerts_the_ids_command_prints(
     pcap = write_pcap(tmp_path / "a.pcap", attack_packets)
     assert main(["ids", str(pcap)]) == 0
     expected = capsys.readouterr().out
-    assert len(expected.splitlines()) == 13
+    assert len(expected.splitlines()) == 16
     pretend(monkeypatch, attack_packets)
     code, out, err = run(capsys, "--ids", "--count", str(len(attack_packets)))
     assert code == 0
@@ -266,7 +266,17 @@ def test_alerts_are_printed_when_they_happen_not_at_the_end(
     code = main(["live", "eth0", "--ids", "--count", str(len(attack_packets))])
     total += len(capsys.readouterr().out.splitlines())
     assert code == 0
-    assert total == 13
+    assert total == 16
+    # The SSH guesser's tenth connection completes at the 1,074th packet, and the two ICMP
+    # alerts come at the 1,144th (replies that changed) and the 1,153rd (large requests).
+    assert [lines_by_call[i] for i in (1073, 1074, 1143, 1144, 1152, 1153)] == [
+        13,
+        14,
+        14,
+        15,
+        15,
+        16,
+    ]
     # The first port scan is complete at the 27th packet: its alert is out before the 28th arrives.
     assert next(i for i, n in enumerate(lines_by_call) if n > 0) == 27
     # Five port scans and the SYN flood are out before the ARP packets (the 902nd) arrive.

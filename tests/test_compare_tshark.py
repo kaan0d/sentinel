@@ -185,6 +185,9 @@ def test_sentinel_fields_of_http_dns_and_tls() -> None:
     assert (hello["tls.record_version"], hello["tls.client_version"]) == (0x0301, 0x0303)
     assert hello["tls.versions"] == [0x2A2A, 0x0304, 0x0303]
     assert hello["tls.extensions"] == [0x1A1A, 0, 10, 43]
+    assert hello["tls.groups"] == [29, 23, 24]
+    assert hello["tls.ja3"] == "61279becc80ab0e3aca57f5913c3e1a0"
+    assert "tls.point_formats" not in hello
     assert list(hello["tls.ciphers"])[:3] == [0x0A0A, 0x1301, 0x1302]  # type: ignore[arg-type]
 
 

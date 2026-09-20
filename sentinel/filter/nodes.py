@@ -32,6 +32,11 @@ class Vlan:
 
 
 @dataclass(frozen=True, slots=True)
+class Ja3:
+    digest: str  # 32 lowercase hex digits
+
+
+@dataclass(frozen=True, slots=True)
 class Host:
     direction: Direction
     addr: Address
@@ -65,7 +70,7 @@ class Or:
     operands: "tuple[Expr, ...]"
 
 
-type Expr = Proto | Vlan | Host | Net | Port | Not | And | Or
+type Expr = Proto | Vlan | Ja3 | Host | Net | Port | Not | And | Or
 
 
 def format_expr(expr: Expr) -> str:
@@ -77,6 +82,8 @@ def format_expr(expr: Expr) -> str:
             return "vlan"
         case Vlan(vid):
             return f"vlan {vid}"
+        case Ja3(digest):
+            return f"ja3 {digest}"
         case Host(direction, addr):
             return f"{direction + ' ' if direction else ''}host {addr}"
         case Net(direction, net):

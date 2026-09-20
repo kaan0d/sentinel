@@ -21,7 +21,7 @@ from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.ipv6 import IPv6
 from sentinel.proto.layer import Layer
 from sentinel.proto.tcp import Tcp
-from sentinel.proto.tls import TlsClientHello
+from sentinel.proto.tls import TlsClientHello, parse_client_hello
 from sentinel.proto.udp import Udp
 from tools.gen_pcap import (
     IP6_A,
@@ -30,6 +30,7 @@ from tools.gen_pcap import (
     IP_B,
     MAC_A,
     MAC_B,
+    client_hello,
     eth_frame,
     generate,
     generate_streams,
@@ -42,6 +43,10 @@ from tools.gen_pcap import (
 Address = IPv4Address | IPv6Address
 Layers = Sequence[Layer]
 Predicate = Callable[[Layers], bool]
+
+
+OTHER_HELLO = client_hello("other.example", [0x0303], [0x1301, 0x1302])
+OTHER_JA3 = parse_client_hello(OTHER_HELLO).ja3
 
 
 def extra_frames() -> list[bytes]:
@@ -63,6 +68,14 @@ def extra_frames() -> list[bytes]:
         b"junk",
         bytes(60),
         eth_frame(MAC_B, MAC_A, 0x0800, b"\x45" + bytes(9)),  # IPv4 header cut short
+        eth_frame(  # a second ClientHello, so that two fingerprints are in the corpus
+            MAC_B,
+            MAC_A,
+            0x0800,
+            ipv4_packet(
+                IP_A, IP_B, 6, tcp_segment(IP_A, IP_B, 4001, 443, 1, 1, 0x18, payload=OTHER_HELLO)
+            ),
+        ),
     ]
 
 
@@ -93,6 +106,16 @@ def ports(layers: Layers) -> tuple[int, int] | None:
     for layer in layers:
         if isinstance(layer, Tcp | Udp) and layer.error is None:
             return layer.src_port, layer.dst_port
+    return None
+
+
+GENERATED_JA3 = "61279becc80ab0e3aca57f5913c3e1a0"
+
+
+def ja3_of(layers: Layers) -> str | None:
+    for layer in layers:
+        if isinstance(layer, TlsClientHello) and layer.error is None:
+            return layer.ja3
     return None
 
 
@@ -161,6 +184,8 @@ PRIMITIVES: list[tuple[str, Predicate]] = [
     ("dns", lambda L: has(L, Dns)),
     ("http", lambda L: has(L, Http)),
     ("tls", lambda L: has(L, TlsClientHello)),
+    ("ja3 61279becc80ab0e3aca57f5913c3e1a0", lambda L: ja3_of(L) == GENERATED_JA3),
+    (f"ja3 {OTHER_JA3}", lambda L: ja3_of(L) == OTHER_JA3),
     ("vlan", lambda L: bool(vlans(L))),
     ("vlan 100", lambda L: 100 in vlans(L)),
     ("vlan 7", lambda L: 7 in vlans(L)),
@@ -311,7 +336,7 @@ def test_errors_in_a_layer_are_handled_as_documented() -> None:
     assert not parse_filter("port 4000").matches(cut_tcp)  # but its ports cannot be trusted
     assert not parse_filter("port 0").matches(cut_tcp)  # not even the zeros left in their place
     assert parse_filter("host 10.0.0.1").matches(cut_tcp)  # the IP header is fine
-    cut_ip = decode(extra_frames()[-1])
+    cut_ip = decode(extra_frames()[-2])  # the last one is the second ClientHello
     assert parse_filter("ip").matches(cut_ip)
     assert not parse_filter("host 10.0.0.1").matches(cut_ip)
     assert not parse_filter("host 0.0.0.0").matches(cut_ip)  # nor the zero address left behind

@@ -10,6 +10,7 @@ from ipaddress import IPv4Address, IPv6Address
 from sentinel.proto.arp import Arp
 from sentinel.proto.dns import Dns
 from sentinel.proto.ethernet import Ethernet
+from sentinel.proto.icmp import Icmp
 from sentinel.proto.ipv4 import IPv4
 from sentinel.proto.ipv6 import IPv6
 from sentinel.proto.layer import Layer
@@ -28,6 +29,7 @@ class PacketView:
     tcp: Tcp | None = None
     udp: Udp | None = None
     dns: Dns | None = None
+    icmp: Icmp | None = None
 
     @property
     def src_ip(self) -> Address | None:
@@ -39,7 +41,7 @@ class PacketView:
 
 
 def make_view(ts_ns: int, layers: Sequence[Layer]) -> PacketView:
-    eth = arp = ip = tcp = udp = dns = None
+    eth = arp = ip = tcp = udp = dns = icmp = None
     for layer in layers:
         if layer.error is not None:
             break  # nothing after a broken layer can be trusted either
@@ -55,4 +57,6 @@ def make_view(ts_ns: int, layers: Sequence[Layer]) -> PacketView:
             udp = layer
         elif isinstance(layer, Dns):
             dns = layer
-    return PacketView(ts_ns, eth, arp, ip, tcp, udp, dns)
+        elif isinstance(layer, Icmp):
+            icmp = layer
+    return PacketView(ts_ns, eth, arp, ip, tcp, udp, dns, icmp)

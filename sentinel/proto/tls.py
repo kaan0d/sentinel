@@ -1,8 +1,10 @@
-"""TLS ClientHello parser: server name (SNI), offered versions and the cipher suite list.
+"""TLS ClientHello parser: server name (SNI), offered versions, the cipher suite list, and the
+JA3 fingerprint of a whole hello.
 
 Reads one TCP segment. A ClientHello that spans several segments or records is parsed as far
 as it is present and reported with an anomaly (reassembly is stage 3)."""
 
+import hashlib
 import struct
 from dataclasses import dataclass
 
@@ -37,6 +39,8 @@ _RECORD_HEADER = 5
 _HANDSHAKE_HEADER = 4
 _MAX_RECORD = 16384
 _EXT_SERVER_NAME = 0
+_EXT_SUPPORTED_GROUPS = 10
+_EXT_EC_POINT_FORMATS = 11
 _EXT_SUPPORTED_VERSIONS = 43
 _HOSTNAME_CHARS = frozenset(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
 
@@ -55,6 +59,38 @@ class TlsClientHello(Layer):
     supported_versions: tuple[int, ...] = ()
     cipher_suites: tuple[int, ...] = ()
     extensions: tuple[int, ...] = ()  # extension type ids, in the order sent
+    supported_groups: tuple[int, ...] = ()  # "elliptic curves" (extension 10), in the order sent
+    ec_point_formats: tuple[int, ...] = ()  # extension 11, in the order sent
+    complete: bool = False  # the whole hello was captured and every field read
+
+    @property
+    def ja3_string(self) -> str | None:
+        """The text that JA3 hashes: version, ciphers, extensions, curves and point formats as
+        decimal numbers, each list joined with "-" and the five fields with ",". GREASE values
+        are left out. None unless the hello is complete, since a cut hello has no fingerprint."""
+        if not self.complete:
+            return None
+
+        def numbers(values: tuple[int, ...]) -> str:
+            return "-".join(str(v) for v in values if not is_grease(v))
+
+        return ",".join(
+            (
+                str(self.client_version),
+                numbers(self.cipher_suites),
+                numbers(self.extensions),
+                numbers(self.supported_groups),
+                numbers(self.ec_point_formats),
+            )
+        )
+
+    @property
+    def ja3(self) -> str | None:
+        """The JA3 fingerprint: the MD5 of `ja3_string`, as 32 lowercase hex digits."""
+        text = self.ja3_string
+        if text is None:
+            return None
+        return hashlib.md5(text.encode("ascii"), usedforsecurity=False).hexdigest()
 
     @property
     def max_version(self) -> int:
@@ -133,6 +169,9 @@ def parse_client_hello(data: bytes) -> TlsClientHello:
     ext_types: list[int] = []
     server_name: str | None = None
     versions: tuple[int, ...] = ()
+    groups: tuple[int, ...] = ()
+    formats: tuple[int, ...] = ()
+    whole = end == fixed + hs_len  # nothing was cut off, and (below) every field read
     cur = _Cursor(data[fixed:end])
     try:
         client_version = cur.u16()
@@ -148,12 +187,14 @@ def parse_client_hello(data: bytes) -> TlsClientHello:
         if cur.pos < len(cur.data):  # extensions are optional
             ext_total = cur.u16()
             region = cur.data[cur.pos : cur.pos + ext_total]
+            whole = whole and len(region) == ext_total
         while len(region) >= 4:
             ext_type, ext_len = struct.unpack_from("!HH", region)
             body = region[4 : 4 + ext_len]
             ext_types.append(ext_type)
             if len(body) < ext_len:
                 anomalies.append(f"truncated tls extension {ext_type}")
+                whole = False
                 break
             if ext_type == _EXT_SERVER_NAME and server_name is None:
                 server_name, problem = _server_name(body)
@@ -165,9 +206,24 @@ def parse_client_hello(data: bytes) -> TlsClientHello:
                     anomalies.append("malformed supported_versions extension")
                 else:
                     versions = struct.unpack(f"!{n // 2}H", body[1 : 1 + n])
+            elif ext_type == _EXT_SUPPORTED_GROUPS:
+                n = int.from_bytes(body[:2])
+                if n % 2 or 2 + n > len(body):
+                    anomalies.append("malformed supported_groups extension")
+                    whole = False
+                else:
+                    groups = struct.unpack(f"!{n // 2}H", body[2 : 2 + n])
+            elif ext_type == _EXT_EC_POINT_FORMATS:
+                n = body[0] if body else 0
+                if 1 + n > len(body):
+                    anomalies.append("malformed ec_point_formats extension")
+                    whole = False
+                else:
+                    formats = tuple(body[1 : 1 + n])
             region = region[4 + ext_len :]
     except _Short:
         anomalies.append("client hello ends before its fields do")
+        whole = False
     return TlsClientHello(
         record_version=record_version,
         client_version=client_version,
@@ -175,5 +231,8 @@ def parse_client_hello(data: bytes) -> TlsClientHello:
         supported_versions=versions,
         cipher_suites=ciphers,
         extensions=tuple(ext_types),
+        supported_groups=groups,
+        ec_point_formats=formats,
+        complete=whole,
         anomalies=tuple(anomalies),
     )

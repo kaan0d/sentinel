@@ -535,6 +535,22 @@ class Timeline:
                 eth_frame(MAC_A, MAC_B, ETHERTYPE_IPV4, ipv4_packet(resolver, client, 17, answer)),
             )
 
+    def icmp_echo(
+        self,
+        seconds: float,
+        src: IPv4Address,
+        dst: IPv4Address,
+        ident: int,
+        seq: int,
+        payload: bytes,
+        reply: bool = False,
+    ) -> None:
+        """An ICMP echo request, or with `reply` an echo reply."""
+        message = icmp_message(0 if reply else 8, 0, ident << 16 | seq, payload)
+        self.add(
+            seconds, eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(src, dst, 1, message))
+        )
+
     def arp(
         self,
         seconds: float,
@@ -561,8 +577,9 @@ ATTACKER_MAC = bytes.fromhex("02ee00000666")
 def generate_benign() -> list[Packet]:
     """Ordinary busy traffic that stays below every detector's threshold, some of it close: a
     web server with 150 completed handshakes in one second, a client using 14 ports of one host,
-    lookups of 40 different subdomains, long readable names, a few 'no such name' answers, and
-    stable ARP. `ids` must raise no alert on it."""
+    lookups of 40 different subdomains, long readable names, a few 'no such name' answers,
+    stable ARP, 9 SSH connections from one admin, 9 large pings answered with the same data, and
+    4 replies with other data. `ids` must raise no alert on it."""
     t = Timeline()
     web = IPv4Address("10.0.0.10")
     for i in range(150):  # a busy server: every handshake completes
@@ -605,14 +622,26 @@ def generate_benign() -> list[Packet]:
     for i in range(10):
         echo = icmp_message(8, 0, 0x00030000 + i, b"ping" * 4)
         t.add(15.0 + i, eth_frame(MAC_B, MAC_A, ETHERTYPE_IPV4, ipv4_packet(browser, web, 1, echo)))
+    admin, ssh_server = IPv4Address("10.0.2.7"), IPv4Address("10.0.0.22")
+    for i in range(9):  # an admin opens 9 SSH connections in 8 seconds, all completed
+        t.handshake(30.0 + i, admin, 43000 + i, ssh_server, 22)
+    for i in range(9):  # 9 pings of 1400 bytes (an MTU test), each answered with the same data
+        data = bytes((j + i) % 256 for j in range(1400))
+        t.icmp_echo(40.0 + i, browser, web, 9, i, data)
+        t.icmp_echo(40.0 + i + 0.001, web, browser, 9, i, data, reply=True)
+    for i in range(4):  # a device that rewrites the data of 4 replies
+        t.icmp_echo(50.0 + i, browser, web, 10, i, b"ping" * 4)
+        t.icmp_echo(50.0 + i + 0.001, web, browser, 10, i, b"pong" * 4, reply=True)
     return t.packets()
 
 
 def generate_attacks() -> list[Packet]:
     """One of each attack, from separate sources. With the default rules `ids` raises exactly
-    13 alerts: 3 stealth scans, a SYN scan, a host sweep, a SYN flood, 3 for ARP spoofing (the
-    gateway address moves to the attacker, a forged sender, and it moves back) and 4 for DNS
-    (random-looking name, many subdomains, a very long name, 'no such name' answers)."""
+    16 alerts: 3 stealth scans, a SYN scan, a host sweep, a SYN flood, 3 for ARP spoofing (the
+    gateway address moves to the attacker, a forged sender, and it moves back), 4 for DNS
+    (random-looking name, many subdomains, a very long name, 'no such name' answers), one for a
+    password guesser making 30 SSH connections, and 2 for an ICMP tunnel (large requests, and
+    replies that do not repeat the request)."""
     t = Timeline()
     rng = random.Random(5)
     target = IPv4Address("10.0.0.30")
@@ -678,6 +707,14 @@ def generate_attacks() -> list[Packet]:
             f"x{rng.getrandbits(40):x}.example.com",
             True,
         )
+    guesser, ssh_server = IPv4Address("10.9.9.6"), IPv4Address("10.0.0.31")
+    for i in range(30):  # a password guesser: 30 SSH connections in 3 seconds, all completed
+        t.handshake(40.0 + i * 0.1, guesser, 53000 + i, ssh_server, 22)
+    rng2 = random.Random(6)  # its own generator, so the packets above stay as they were
+    pinger, drop = IPv4Address("10.0.8.8"), IPv4Address("10.0.0.40")
+    for i in range(20):  # data in pings: 800 random bytes out, 800 other random bytes back
+        t.icmp_echo(45.0 + i * 0.2, pinger, drop, 0x1234, i, rng2.randbytes(800))
+        t.icmp_echo(45.0 + i * 0.2 + 0.05, drop, pinger, 0x1234, i, rng2.randbytes(800), True)
     return t.packets()
 
 

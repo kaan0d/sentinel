@@ -19,8 +19,8 @@ Work is done in stages, and a stage is finished only when its tests pass and ruf
 | 7 | Benchmarks, fuzzer, CI | done |
 | 8 | pcapng reader: Wireshark's default file format, for `read`, `flows` and `ids` | done |
 | 9 | Compare with `tshark` on generated and public sample captures, and fix every difference | done |
-| 10 | Two more detectors: SSH brute force, ICMP tunneling | next |
-| 11 | TLS fingerprint (JA3) from the ClientHello | planned |
+| 10 | Two more detectors: SSH brute force, ICMP tunneling | done |
+| 11 | TLS fingerprint (JA3) from the ClientHello, and a `ja3` filter | done |
 | 12 | Live capture on Windows, IP level only, if it turns out to be reliable | maybe |
 
 ## Install
@@ -68,7 +68,7 @@ python -m sentinel read demo.pcap
 2023-11-14 22:13:20.015000 IP 10.0.0.2.53 > 10.0.0.1.53003: UDP, length 63: DNS response 4660 NOERROR, A? www.example.com, answers [CNAME example.com, A 192.0.2.1]
 2023-11-14 22:13:20.016000 IP 10.0.0.1.42000 > 10.0.0.2.53: Flags [P.], seq 1, ack 1, win 64240, length 31: DNS query 17185, AAAA? example.com
 2023-11-14 22:13:20.017000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [P.], seq 5001, ack 1039, win 64240, length 77: HTTP: HTTP/1.1 200 OK
-2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more]
+2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
 ```
 
 Timestamps are UTC with microsecond precision, so the output does not depend on the machine's time zone. Anomalies and errors are appended to a line as `[...]`, for example `[bad ipv4 header checksum]`.
@@ -109,7 +109,7 @@ python -m sentinel flows streams.pcap
 
 ```
 tcp 10.0.0.1:44000 > 10.0.0.2:8080: closed, pkts 8/3, bytes 129/40, 0.010000s [1 retransmitted client segment] [1 out-of-order client segment] | -> HTTP: POST /upload HTTP/1.1, host files.test | <- HTTP: HTTP/1.1 200 OK
-tcp 10.0.0.1:45000 > 10.0.0.2:8443: established, pkts 4/1, bytes 161/0, 0.004000s [1 out-of-order client segment] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more]
+tcp 10.0.0.1:45000 > 10.0.0.2:8443: established, pkts 4/1, bytes 161/0, 0.004000s [1 out-of-order client segment] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
 tcp 10.0.0.1:46000 > 10.0.0.2:53: established, pkts 4/1, bytes 66/0, 0.004000s | -> DNS query 1, A? example.com | -> DNS query 2, AAAA? www.example.com
 tcp 10.0.0.1:47000 > 10.0.0.2:80: closing, pkts 5/1, bytes 160/0, 0.005000s [100 client bytes missing]
 tcp 10.0.0.1:48000 > 10.0.0.2:22: reset, pkts 1/1, bytes 0/0, 0.001000s
@@ -139,6 +139,9 @@ python -m sentinel ids attacks.pcap --rules rules/
 2023-11-14T22:13:52.450000Z [medium] dns-tunnel: 10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s
 2023-11-14T22:13:55.000000Z [medium] dns-tunnel: 10.0.5.6 asked for a very long name under example.org (124 characters)
 2023-11-14T22:13:56.951000Z [medium] dns-tunnel: 10.0.6.6 received 20 'no such name' answers in 0.9s
+2023-11-14T22:14:00.902000Z [medium] ssh-brute-force: 10.9.9.6 made 10 connections to the SSH port of 10.0.0.31 in 0.9s
+2023-11-14T22:14:05.850000Z [medium] icmp-tunnel: 10.0.8.8 got 5 echo replies from 10.0.0.40 that do not repeat the data it sent, in 0.8s
+2023-11-14T22:14:06.800000Z [medium] icmp-tunnel: 10.0.8.8 sent 10 echo requests of 512 bytes or more to 10.0.0.40 in 1.8s
 ```
 
 The same capture with `--format json` (the default) gives one object per alert with the fields `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence`. `python tools/gen_pcap.py --benign benign.pcap` writes busy but harmless traffic, and `ids` prints nothing for it.
@@ -157,10 +160,10 @@ The first prints the same lines as `read`, as the packets arrive. The last runs 
 
 | What | Result |
 |------|--------|
-| Tests | 796 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
+| Tests | 895 pass here, 6 more need Linux and root; ruff and strict mypy are clean |
 | CI | GitHub Actions, 5 jobs green: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests as root on an Ubuntu runner (a real packet socket on the loopback interface) |
-| Sabotage | 299 deliberate one-line breaks of the code, every one caught by the tests |
-| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 9): 0 failures |
+| Sabotage | 381 deliberate one-line breaks of the code, every one caught by the tests |
+| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 11): 0 failures |
 | tshark | 10 captures (6 public ones from other people's networks), 2,987 packets, 68,756 field values compared with Wireshark's `tshark`: 0 unexplained differences, after 3 bugs found in Sentinel and fixed |
 | Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5) |
 | Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
@@ -227,6 +230,7 @@ The first prints the same lines as `read`, as the packets arrive. The last runs 
 |------|---------|
 | `ip`, `ip6`, `arp`, `tcp`, `udp`, `icmp` | packets that have that layer |
 | `dns`, `http`, `tls` | packets with that application layer (TLS means a ClientHello) |
+| `ja3 HASH` | ClientHello packets whose JA3 fingerprint is HASH (32 hex digits, any case), see Stage 11 |
 | `vlan`, `vlan 100` | any VLAN tag, or a tag with that id (any tag of a stacked pair) |
 | `host 10.0.0.1`, `host 2001:db8::1` | that address as source or destination (also ARP sender and target) |
 | `net 10.0.0.0/8` | an address inside that network |
@@ -279,7 +283,7 @@ Loading never raises. Every problem in every file is reported at once, with the 
 
 **Limits.** Every detector keeps bounded state (100,000 keys, capped sliding windows, oldest half-open handshakes dropped first). When a limit forces a packet to be ignored, the run ends with a low-severity alert that says how many.
 
-**Tests.** 441 tests in total. `tools/gen_pcap.py --benign` writes 647 packets kept just below every threshold (150 completed handshakes in one second, 14 ports of one host, 25 hosts on one port, 40 subdomains, long readable names, repeated ARP announcements): it must raise no alert. `--attacks` writes one of each attack and must raise exactly 13 alerts, listed one by one in the tests. Every detector is tested one below its threshold, at it, at the window edge and switched off, and the engine is fuzzed with random frames, truncations, corruptions and scrambled timestamps.
+**Tests.** 441 tests in total. `tools/gen_pcap.py --benign` writes 647 packets (700 since stage 10) kept just below every threshold (150 completed handshakes in one second, 14 ports of one host, 25 hosts on one port, 40 subdomains, long readable names, repeated ARP announcements): it must raise no alert. `--attacks` writes one of each attack and must raise exactly 13 alerts (16 since stage 10), listed one by one in the tests. Every detector is tested one below its threshold, at it, at the window edge and switched off, and the engine is fuzzed with random frames, truncations, corruptions and scrambled timestamps.
 
 ## Stage 6: live capture
 
@@ -400,6 +404,57 @@ Reading the table:
 
 **What this does not show.** Only header fields and conversation counts are compared, not the bytes of a reassembled stream, and only against one version of `tshark`. Six public captures of about 110 KB are a small sample of what a network sends. The two programs can be wrong in the same way, but they were written by different people from the same documents.
 
+## Stage 10: SSH brute force and ICMP tunneling
+
+Two more detectors, built like the four of stage 5: typed and range-checked parameters, a rule in `rules/default.toml` (a test keeps it equal to the built-in defaults), bounded state, one alert per attack and window, and the numbers behind the alert in `evidence`.
+
+| Detector | Looks for | Default | Expect false positives from |
+|----------|-----------|---------|-----------------------------|
+| `ssh_brute_force` | one client completing many TCP connections to the SSH port of one server (`port` sets another; copy the rule for a second port) | 10 completed connections within 60 s | backups, configuration tools, scripts that run `git` or `ssh` in a loop |
+| `icmp_tunnel` | data carried in ping (ICMP echo, IPv4 only): echo requests of 512 bytes or more, and echo replies whose data is not what the request carried | 10 large requests, or 5 changed replies, within 60 s | a run of large pings for an MTU test, a device that rewrites the data of replies |
+
+**SSH.** The traffic is encrypted, so a failed login cannot be seen. What can be seen is how often a client connects, and a tool that opens a new connection for every few guesses shows that rate. Only connections that complete the handshake count (the ACK that ends it is seen): half-open ones, refused ones and SYN scans are what `port_scan` and `syn_flood` are for, and a scan of port 22 should not also be a brute force. A retransmitted SYN is one connection, and the ACKs that follow on it do not count again. A server on another port needs its own rule, with `port`.
+
+**ICMP.** A real echo reply carries back exactly the data of its request, and a request carries a few dozen bytes (56 on Linux, 32 on Windows). A tunnel sends much more, and its replies carry other data. So there are two signals, each with a count and a window. For every request the detector keeps an 8-byte digest of its data, not the data, and compares it with the digest of the reply that has the same addresses, identifier and sequence number; a reply with no request in the capture is ignored, and so is anything that was not captured whole (a cut request would look small and a cut reply would look changed). ICMPv6 is not decoded, so a tunnel over IPv6 is not seen.
+
+**Thresholds.** They are guesses, like those of stage 5: I had no capture of real SSH guessing or of a tunnel. What I can say is where the generated captures sit. `--benign` (now 700 packets) has an admin opening 9 SSH connections in 8 seconds, 9 pings of 1400 bytes answered with the same data, and 4 replies with other data: it raises nothing, and the tests lower each threshold by one and check that it then raises exactly one alert. `--attacks` (now 1,174 packets, 16 alerts) adds a password guesser making 30 connections in 3 seconds and a tunnel of 20 pings of 800 random bytes answered with 800 other random bytes. Measured by asking the detectors with a higher and higher threshold, the most that one window holds is:
+
+| Signal | Threshold | Benign capture | Attack capture |
+|--------|-----------|----------------|----------------|
+| completed SSH connections in 60 s | 10 | 9 | 30 |
+| large echo requests in 60 s | 10 | 9 | 20 |
+| changed echo replies in 60 s | 5 | 4 | 20 |
+
+**Real traffic.** The six public captures of stage 9 (`dns.cap` (38), `ipv4frags.pcap` (3), `200722_win_scale_examples_anon.pcapng` (26), `v6.pcap` (161), `vlan.cap` (395), `arp-storm.pcap` (622)) raise no alert from these two detectors. That is a small test, and none of them has SSH or large pings in it. It did show a false positive of an older detector, see Limits.
+
+**Speed.** With the six default detectors the `ids` stage of the benchmark runs at 40,245 packets per second on this machine (42,033 with four in stage 7, decode 99,237). The benchmark stage is now called `ids: decode and run the default detectors`; the tables of stage 7 keep their measurements, made with four.
+
+**Tests.** 851 run here (55 new, 55 of them in `tests/test_ids_ssh_icmp.py`), and 6 need Linux and root. Every parameter and each threshold one below, at, and one above; the window edge; half-open, refused, retransmitted and stray connections; other ports; requests and replies matched only with their own; the tables at their limits; ICMPv6, cut messages and random bytes; the golden `ids` output, the live loop (the SSH alert is printed at the packet that completes the tenth connection) and the default rule file. Sabotage: 50 new one-line breaks (349 in all), every one caught. Fuzzing: 3,000,000 inputs (seed 10), 0 failures.
+
+## Stage 11: TLS fingerprint (JA3)
+
+The server name in a ClientHello says who a client talks to. The JA3 fingerprint says what is talking: the TLS library of a program picks the cipher suites, the extensions and their order, so one program gives one fingerprint whatever it connects to.
+
+```
+2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
+```
+
+**JA3.** The MD5 of one line of five fields, all decimal: the version of the hello, the cipher suites, the extension types, the elliptic curves (extension 10) and the point formats (extension 11), each list in the order sent and joined with `-`, the five joined with `,`. GREASE values (`0x0a0a`, `0x1a1a` ... `0xfafa`, which clients add at random to keep servers honest) are left out, or the fingerprint of one client would change on every connection. This hello gives `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-10-43,29-23-24,`, and so `61279becc80ab0e3aca57f5913c3e1a0`.
+
+**In the program.** `TlsClientHello` reads the two lists that JA3 needs (`supported_groups`, `ec_point_formats`) and says whether the whole hello was captured and every field read (`complete`). `ja3_string` and `ja3` are properties, and are `None` unless the hello is complete: a cut hello has no fingerprint, and a wrong one would be worse than none. So a hello split over two segments has no `ja3` in `read` (the line ends with `[truncated client hello: 81 of 152 handshake bytes]` and has no `ja3`), while `flows`, which reassembles the stream, does print it.
+
+**Finding a fingerprint.** `--filter "ja3 HASH"` works in `read`, `flows` and `live`, and in the `filter` of a rule of `ids` (the hash is 32 hex digits, in any case, and prints back in lower case).
+
+```
+python -m sentinel read capture.pcap --filter "ja3 61279becc80ab0e3aca57f5913c3e1a0"
+```
+
+**Checked against.** The example of the JA3 specification (`769,47-53-5-10-49161-49162-49171-49172-50-56-19-4,0-10-11,23-24-25,0`) must give `ada70206e40642a3e4461f35503241d5`. And `tshark` computes JA3 too, so `tools/compare_tshark.py` compares it (and the two lists) for every ClientHello it sees: the demo capture and 6 hellos built for the test (with GREASE in every list, without extensions, with repeated values, with values that only look like GREASE) all agree, 203 field values compared, no difference. The same client reaching two names has one fingerprint, another order of the ciphers has another, and two draws of GREASE have the same one (all three are tests).
+
+**Tests.** 895 run here (44 new, 42 of them in `tests/test_ja3.py`), and 6 need Linux and root. Known answers, GREASE in every list and near misses, order and repeats, every shorter prefix of a hello (no fingerprint), every malformed list, the summary line, the filter (the grammar, the errors with their positions, printing back, the corpus) and the real `tshark`. Sabotage: 32 new one-line breaks (381 in all), every one caught. Fuzzing: 3,000,000 inputs (seed 11), 0 failures.
+
+**What it does not show.** Only the client side: no JA3S for the server hello, and no JA4. JA3 depends on the order of the extensions, and some clients now shuffle it on every connection, so their JA3 changes each time. A fingerprint tells software apart; it does not name a program or a person. All of it was tested on hellos I built, and on none that a real browser sent, because no TLS capture of one was available here.
+
 ## Limits
 
 - IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
@@ -411,8 +466,8 @@ Reading the table:
 - ARP: Ethernet/IPv4 only. Only link type Ethernet is read. Frames with an 802.3 length instead of an ethertype (an LLC header: spanning tree, NetBIOS, SNAP-encapsulated ARP or IP) print as `802.3` and are not decoded above Ethernet.
 - pcapng: name resolution and interface statistics blocks, comments and packet flags are skipped, and compressed files (`.pcapng.gz`) are not opened. A simple packet block has no timestamp, so a file of only those has every time at 0. Only the generator writes pcapng; `live --write` still saves classic pcap. Files written by Wireshark 4.6.8 were checked in stage 9.
 - VLAN tags keep the VLAN id and drop the priority bits.
-- HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN or fingerprints.
-- IDS: rules are TOML only (no YAML). Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose.
+- HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN, and only the JA3 fingerprint (no JA3S for the server hello, no JA4).
+- IDS: rules are TOML only (no YAML). `ssh_brute_force` counts completed connections and cannot see failed logins; `icmp_tunnel` reads IPv4 only and only messages captured whole, so a short snap length hides large requests. Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose. A false positive on real traffic, found in stage 10 and not fixed: the public `dns.cap` raises one `dns-tunnel` alert for an Active Directory lookup, `_ldap._tcp.05b5292b-34b8-4fb7-85a3-8beef5fd2069.domains._msdcs.utelsystems.local`, whose GUID label reads as random.
 - Live capture: Linux only, and only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
 - Printed timestamps have microsecond precision.
 - Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Only synthetic traffic, and no real network apart from the loopback test.

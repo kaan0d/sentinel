@@ -77,7 +77,8 @@ def test_several_rules_of_one_detector() -> None:
         ),
         (
             "[[rule]]\nid = 'a'\n",
-            "rule 1 (a): missing 'detector' (known: arp_spoof, dns_tunnel, port_scan, syn_flood)",
+            "rule 1 (a): missing 'detector' (known: arp_spoof, dns_tunnel, icmp_tunnel, "
+            "port_scan, ssh_brute_force, syn_flood)",
         ),
         ("[[rule]]\nid = 'a'\ndetector = 'nope'\n", "rule 1 (a): unknown detector 'nope' (known:"),
         (
@@ -218,7 +219,14 @@ def test_files_over_the_size_limit_are_refused(
 def test_the_built_in_defaults() -> None:
     result = default_rules()
     assert result.errors == ()
-    assert [r.id for r in result.rules] == ["port-scan", "syn-flood", "arp-spoof", "dns-tunnel"]
+    assert [r.id for r in result.rules] == [
+        "port-scan",
+        "syn-flood",
+        "arp-spoof",
+        "dns-tunnel",
+        "ssh-brute-force",
+        "icmp-tunnel",
+    ]
     assert {r.detector for r in result.rules} == set(DETECTORS)
 
 

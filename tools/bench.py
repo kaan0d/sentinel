@@ -223,7 +223,7 @@ def stages(packets: Sequence[Packet]) -> list[tuple[str, Stage]]:
         ("read: decode and print a line", read_lines),
         ("filter: decode and match", filter_all),
         ("flows: decode, reassemble, print", flows),
-        ("ids: decode and run 4 detectors", ids),
+        ("ids: decode and run the default detectors", ids),
         ("live loop, printing lines", lambda: _live(packets)),
         ("live loop, running the detectors", lambda: _live(packets, "--ids")),
         ("live loop, saving to a file", live_write),

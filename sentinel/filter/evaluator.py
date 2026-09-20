@@ -18,6 +18,7 @@ from sentinel.filter.nodes import (
     Direction,
     Expr,
     Host,
+    Ja3,
     Net,
     Not,
     Or,
@@ -86,6 +87,11 @@ def matches(expr: Expr, layers: Sequence[Layer]) -> bool:
             if not isinstance(eth, Ethernet) or eth.error:
                 return False
             return bool(eth.vlans) if vid is None else vid in eth.vlans
+        case Ja3(digest):
+            return any(
+                isinstance(layer, TlsClientHello) and not layer.error and layer.ja3 == digest
+                for layer in layers
+            )
         case Host(direction, addr):
             return _side(_addresses(layers), direction, lambda a: a == addr)
         case Net(direction, net):

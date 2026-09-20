@@ -49,13 +49,19 @@ ATTACK_ALERTS = [
     ("dns-tunnel", "10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s"),
     ("dns-tunnel", "10.0.5.6 asked for a very long name under example.org (124 characters)"),
     ("dns-tunnel", "10.0.6.6 received 20 'no such name' answers in 0.9s"),
+    ("ssh-brute-force", "10.9.9.6 made 10 connections to the SSH port of 10.0.0.31 in 0.9s"),
+    (
+        "icmp-tunnel",
+        "10.0.8.8 got 5 echo replies from 10.0.0.40 that do not repeat the data it sent, in 0.8s",
+    ),
+    ("icmp-tunnel", "10.0.8.8 sent 10 echo requests of 512 bytes or more to 10.0.0.40 in 1.8s"),
 ]
 
 
 def test_each_attack_raises_its_alert_and_nothing_else() -> None:
     alerts = run(generate_attacks())
     assert [(a.rule, a.message) for a in alerts] == ATTACK_ALERTS
-    assert [a.severity for a in alerts] == ["medium"] * 5 + ["high"] * 4 + ["medium"] * 4
+    assert [a.severity for a in alerts] == ["medium"] * 5 + ["high"] * 4 + ["medium"] * 7
     assert [a.ts_ns for a in alerts] == sorted(a.ts_ns for a in alerts)
 
 

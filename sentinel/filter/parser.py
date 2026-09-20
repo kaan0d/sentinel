@@ -6,7 +6,7 @@
     not       := ("not" | "!") not | primary
     primary   := "(" expr ")" | primitive
     primitive := PROTO [ qualified ]           tcp port 80  ==  tcp and port 80
-               | qualified | "vlan" [ NUMBER ]
+               | qualified | "vlan" [ NUMBER ] | "ja3" HASH
     qualified := [ "src" | "dst" ] ( "host" ADDRESS | "net" NETWORK
                                    | "port" NUMBER | "portrange" NUMBER "-" NUMBER )
     PROTO     := ip | ip6 | arp | tcp | udp | icmp | dns | http | tls
@@ -25,6 +25,7 @@ from sentinel.filter.nodes import (
     Expr,
     FilterError,
     Host,
+    Ja3,
     Net,
     Not,
     Or,
@@ -34,6 +35,7 @@ from sentinel.filter.nodes import (
 )
 
 MAX_DEPTH = 100
+_HEX = frozenset("0123456789abcdef")
 
 
 class _Fail(Exception):
@@ -148,6 +150,14 @@ class _Parser:
                 self._i += 1
                 return Vlan(_number(nxt, "a VLAN id", 4095))
             return Vlan(None)
+        if word == "ja3":
+            value = self._take("a JA3 hash")
+            digest = value.text.lower()
+            if len(digest) != 32 or not set(digest) <= _HEX:
+                raise _Fail(
+                    f"expected a JA3 hash of 32 hex digits, got {_q(value.text)}", value.pos
+                )
+            return Ja3(digest)
         if word in PROTOCOLS:
             nxt = self._peek()
             if nxt is not None and nxt.kind == WORD and nxt.text.lower() in QUALIFIERS:

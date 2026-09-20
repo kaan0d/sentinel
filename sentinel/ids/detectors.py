@@ -4,6 +4,7 @@ Every detector keeps bounded state (see MAX_KEYS and SlidingWindow) and reports 
 ignore packets because of it. A detector never raises on a packet: it only sees intact layers
 (see PacketView)."""
 
+import hashlib
 import math
 from collections import OrderedDict
 from collections.abc import Hashable, Mapping
@@ -15,6 +16,7 @@ from sentinel.ids.params import Param, Value
 from sentinel.ids.view import PacketView
 from sentinel.ids.window import SlidingWindow
 from sentinel.proto import tcp as tcpflags
+from sentinel.proto.icmp import ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, Icmp
 
 MAX_KEYS = 100_000  # tracked sources, targets, pairs or bindings per detector
 
@@ -446,6 +448,197 @@ class DnsTunnel(Detector):
         return []
 
 
+class SshBruteForce(Detector):
+    """One client opening many connections to the SSH port of one server in a short time.
+
+    SSH is encrypted, so a failed login cannot be seen. What can be seen is how often a client
+    connects, and a password guesser connects again and again. Only connections that complete
+    the handshake count: half-open ones are what the scan and flood detectors are for."""
+
+    name = "ssh_brute_force"
+    severity = "medium"
+    params = (
+        Param("port", int, 22, 1, 65535, "the port the servers listen on"),
+        Param(
+            "connections",
+            int,
+            10,
+            1,
+            1_000_000,
+            "completed connections from one client to one server",
+        ),
+        Param("window_seconds", float, 60.0, 0.001, 86_400, "how long they may take"),
+    )
+
+    def __init__(self, config: Mapping[str, Value]) -> None:
+        super().__init__(config)
+        self._port = int(config["port"])
+        self._needed = int(config["connections"])
+        self._window = _window_ns(config)
+        self._done: OrderedDict[tuple[str, str], SlidingWindow] = OrderedDict()
+        # (client, its port, server) of connections that wait for the ACK that completes them
+        self._pending: dict[tuple[str, int, str], None] = {}
+
+    def on_packet(self, view: PacketView) -> list[Detection]:
+        tcp, src, dst = view.tcp, view.src_ip, view.dst_ip
+        if tcp is None or src is None or dst is None or tcp.dst_port != self._port:
+            return []
+        client, server = str(src), str(dst)
+        conn = (client, tcp.src_port, server)
+        if tcp.flags & tcpflags.SYN and not tcp.flags & tcpflags.ACK:
+            self._pending.pop(conn, None)
+            if len(self._pending) >= MAX_KEYS:
+                del self._pending[next(iter(self._pending))]  # forget the oldest half-open one
+            self._pending[conn] = None
+            return []
+        third_packet = tcp.flags & tcpflags.ACK and not tcp.flags & (tcpflags.SYN | tcpflags.RST)
+        if not third_packet or conn not in self._pending:
+            return []
+        del self._pending[conn]
+        w = self._table_window(
+            self._done, (client, server), self._window, self._needed + 1, view.ts_ns
+        )
+        if w is None:
+            return []
+        w.add(view.ts_ns)
+        if w.count >= self._needed and self._first((client, server), view.ts_ns, self._window):
+            seconds = w.span_ns / 1e9
+            return [
+                Detection(
+                    view.ts_ns,
+                    f"{client} made {w.count} connections to the SSH port of {server} "
+                    f"in {seconds:.1f}s",
+                    client,
+                    server,
+                    {"connections": w.count, "port": self._port, "seconds": round(seconds, 3)},
+                )
+            ]
+        return []
+
+
+def _digest(data: bytes) -> bytes:
+    return hashlib.blake2b(data, digest_size=8).digest()
+
+
+class IcmpTunnel(Detector):
+    """Signs of data carried in ICMP echo (ping) messages.
+
+    A real ping is answered with the data it sent, and carries a few dozen bytes. A tunnel sends
+    much more than that, and its replies carry other data than the request did. Only IPv4 (ICMPv6
+    is not decoded), and only messages captured whole."""
+
+    name = "icmp_tunnel"
+    severity = "medium"
+    params = (
+        Param(
+            "min_payload_bytes",
+            int,
+            512,
+            0,
+            65535,
+            "an echo request with this much data or more is large (0: off)",
+        ),
+        Param("large_requests", int, 10, 1, 1_000_000, "large requests from one host to another"),
+        Param(
+            "changed_replies",
+            int,
+            5,
+            0,
+            1_000_000,
+            "replies with other data than the request (0: off)",
+        ),
+        Param("window_seconds", float, 60.0, 0.001, 86_400, "window for both counts"),
+    )
+
+    def __init__(self, config: Mapping[str, Value]) -> None:
+        super().__init__(config)
+        self._min_payload = int(config["min_payload_bytes"])
+        self._large_needed = int(config["large_requests"])
+        self._changed_needed = int(config["changed_replies"])
+        self._window = _window_ns(config)
+        self._large: OrderedDict[tuple[str, str], SlidingWindow] = OrderedDict()
+        self._changed: OrderedDict[tuple[str, str], SlidingWindow] = OrderedDict()
+        # what each request carried, by (sender, receiver, identifier, sequence number)
+        self._requests: dict[tuple[str, str, int, int], bytes] = {}
+
+    def on_packet(self, view: PacketView) -> list[Detection]:
+        icmp, ip, src, dst = view.icmp, view.ip, view.src_ip, view.dst_ip
+        if icmp is None or ip is None or src is None or dst is None or not ip.is_complete:
+            return []
+        if icmp.code != 0:
+            return []
+        if icmp.icmp_type == ICMP_ECHO_REQUEST:
+            return self._request(view.ts_ns, str(src), str(dst), icmp)
+        if icmp.icmp_type == ICMP_ECHO_REPLY:
+            return self._reply(view.ts_ns, str(src), str(dst), icmp)
+        return []
+
+    def _request(self, ts_ns: int, client: str, server: str, icmp: Icmp) -> list[Detection]:
+        if self._changed_needed:
+            key = (client, server, icmp.ident, icmp.seq)
+            self._requests.pop(key, None)
+            if len(self._requests) >= MAX_KEYS:
+                del self._requests[next(iter(self._requests))]
+            self._requests[key] = _digest(icmp.payload)
+        size = len(icmp.payload)
+        if not self._min_payload or size < self._min_payload:
+            return []
+        w = self._table_window(
+            self._large, (client, server), self._window, self._large_needed + 1, ts_ns
+        )
+        if w is None:
+            return []
+        w.add(ts_ns)
+        if w.count >= self._large_needed and self._first(
+            ("large", client, server), ts_ns, self._window
+        ):
+            seconds = w.span_ns / 1e9
+            return [
+                Detection(
+                    ts_ns,
+                    f"{client} sent {w.count} echo requests of {self._min_payload} bytes or more "
+                    f"to {server} in {seconds:.1f}s",
+                    client,
+                    server,
+                    {
+                        "signal": "large_echo",
+                        "requests": w.count,
+                        "bytes": size,
+                        "seconds": round(seconds, 3),
+                    },
+                )
+            ]
+        return []
+
+    def _reply(self, ts_ns: int, server: str, client: str, icmp: Icmp) -> list[Detection]:
+        if not self._changed_needed:
+            return []
+        sent = self._requests.pop((client, server, icmp.ident, icmp.seq), None)
+        if sent is None or sent == _digest(icmp.payload):
+            return []
+        w = self._table_window(
+            self._changed, (client, server), self._window, self._changed_needed + 1, ts_ns
+        )
+        if w is None:
+            return []
+        w.add(ts_ns)
+        if w.count >= self._changed_needed and self._first(
+            ("changed", client, server), ts_ns, self._window
+        ):
+            seconds = w.span_ns / 1e9
+            return [
+                Detection(
+                    ts_ns,
+                    f"{client} got {w.count} echo replies from {server} that do not repeat "
+                    f"the data it sent, in {seconds:.1f}s",
+                    client,
+                    server,
+                    {"signal": "changed_reply", "replies": w.count, "seconds": round(seconds, 3)},
+                )
+            ]
+        return []
+
+
 DETECTORS: dict[str, type[Detector]] = {
-    cls.name: cls for cls in (PortScan, SynFlood, ArpSpoof, DnsTunnel)
+    cls.name: cls for cls in (PortScan, SynFlood, ArpSpoof, DnsTunnel, SshBruteForce, IcmpTunnel)
 }

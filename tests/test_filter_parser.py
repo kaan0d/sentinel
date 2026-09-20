@@ -10,6 +10,7 @@ from sentinel.filter.nodes import (
     Expr,
     FilterError,
     Host,
+    Ja3,
     Net,
     Not,
     Or,
@@ -203,7 +204,7 @@ def rand_expr(rng: random.Random, depth: int = 0) -> Expr:
 
 def rand_primitive(rng: random.Random) -> Expr:
     direction: Direction = rng.choice([None, "src", "dst"])
-    kind = rng.randrange(6)
+    kind = rng.randrange(7)
     if kind == 0:
         return Proto(rng.choice(["ip", "ip6", "arp", "tcp", "udp", "icmp", "dns", "http", "tls"]))
     if kind == 1:
@@ -221,6 +222,8 @@ def rand_primitive(rng: random.Random) -> Expr:
         prefix = rng.randint(0, bits)
         base = IPv6Address(raw) if v6 else IPv4Address(raw)
         return Net(direction, ip_network((base, prefix), strict=False))
+    if kind == 6:
+        return Ja3(f"{rng.getrandbits(128):032x}")
     lo = rng.randrange(65536)
     hi = lo if kind == 4 else rng.randint(lo, 65535)
     return Port(direction, lo, hi)
@@ -252,6 +255,7 @@ def test_parsing_is_stable_under_reprinting() -> None:
         "1.2.3.4",
     ]
     words += ["src", "dst", "net", "10.0.0.0/8", "portrange", "1-9", "vlan", "5", "arp", "icmp"]
+    words += ["ja3", "0123456789abcdef0123456789abcdef", "ja3"]
     parsed = 0
     for _ in range(20000):
         text = " ".join(rng.choice(words) for _ in range(rng.randint(1, 6)))
