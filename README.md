@@ -492,6 +492,7 @@ tools/fuzz.py      fuzzer: damaged packets and capture files through the whole p
 tools/compare_tshark.py  compares Sentinel's decoding with tshark's (needs Wireshark)
 .github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root
 tests/             pytest tests
+LICENSE            MIT
 ```
 
 ## Development
@@ -504,3 +505,7 @@ mypy
 python -m tools.fuzz
 python -m tools.bench
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
