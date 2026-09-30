@@ -2,37 +2,22 @@
 
 [![CI](https://github.com/kaan0d/sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/kaan0d/sentinel/actions/workflows/ci.yml)
 
-Packet analyzer and rule-based network IDS, written from scratch in Python. The protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark. No runtime dependencies.
+Packet analyzer and rule-based network IDS in pure Python. All protocol parsers are hand-written with `struct`: no Scapy, dpkt or pyshark, and no runtime dependencies.
 
-Work is done in stages, and a stage is finished only when its tests pass and ruff and strict mypy are clean. Stages 1 to 7 are the first series (the project as a whole); stage 8 on is a second series that takes it further, one weakness of the first series at a time. Stage 12 was a plan that said "if it turns out to be reliable". Stage 13 changes no code: it runs the detectors on real captures, and it is the last one for now.
+Write-ups: [Part 1: the analyzer](https://kaan0d.github.io/posts/sentinel-packet-analyzer) · [Part 2: next level](https://kaan0d.github.io/posts/sentinel-next-level) · [Part 3: real traffic](https://kaan0d.github.io/posts/sentinel-real-world)
 
-Write-ups, one per series:
+## Features
 
-- [Part 1: writing a packet analyzer from scratch](https://kaan0d.github.io/posts/sentinel-packet-analyzer) (stages 1 to 7)
-- [Part 2: taking Sentinel to the next level](https://kaan0d.github.io/posts/sentinel-next-level) (stages 8 to 12)
-- [Part 3: Sentinel meets real traffic](https://kaan0d.github.io/posts/sentinel-real-world) (stage 13)
-
-## Status
-
-| Stage | What it adds | State |
-|-------|--------------|-------|
-| 1 | pcap reader/writer, Ethernet, ARP, IPv4, IPv6, TCP, UDP, ICMP parsers, `read` command | done |
-| 2 | DNS, plaintext HTTP, TLS ClientHello (SNI, versions, cipher list) | done |
-| 3 | Flow tracking, TCP stream reassembly, per-flow statistics, `flows` command | done |
-| 4 | Filter language (`tcp and (port 80 or port 443) and not src host 10.0.0.1`), `--filter` option | done |
-| 5 | IDS engine: port scan, SYN flood, ARP spoofing, DNS tunneling, rules, JSON alerts, `ids` command | done |
-| 6 | Live capture (Linux AF_PACKET), `live` command | done |
-| 7 | Benchmarks, fuzzer, CI | done |
-| 8 | pcapng reader: Wireshark's default file format, for `read`, `flows` and `ids` | done |
-| 9 | Compare with `tshark` on generated and public sample captures, and fix every difference | done |
-| 10 | Two more detectors: SSH brute force, ICMP tunneling | done |
-| 11 | TLS fingerprint (JA3) from the ClientHello, and a `ja3` filter | done |
-| 12 | Live capture on Windows: IPv4 only, no Npcap | done |
-| 13 | Real traffic: the detectors on real attack captures and on a slice of a 1 Gbps backbone, checked against `tshark` (no code changed) | done |
+- **Capture files:** classic pcap (both byte orders, µs and ns) and pcapng, detected from the file's magic bytes.
+- **Parsers:** Ethernet (stacked 802.1Q/802.1ad), ARP, IPv4, IPv6, TCP, UDP, ICMP, DNS, HTTP/1.x, TLS ClientHello (SNI, versions, ciphers, JA3). Every parser is bounds-checked and never raises; problems are reported as `error` or `anomalies`. Network strings are escaped before printing.
+- **Flows:** bidirectional TCP/UDP flows, TCP reassembly (out-of-order, retransmitted, overlapping, sequence wrap), with conflicting overlaps and gaps reported. DNS, HTTP and TLS are parsed from the reassembled streams.
+- **Filter language:** BPF-like (`tcp and (port 80 or port 443) and not src host 10.0.0.1`, `ja3 HASH`, `vlan 100`, `net 10.0.0.0/8`). Parse errors come back as values with a position.
+- **IDS:** port scan, SYN flood, ARP spoofing, DNS tunneling, SSH brute force and ICMP tunneling detectors, configured by TOML rules, with JSON or text alerts. All detector state is bounded.
+- **Live capture:** Linux `AF_PACKET`, and Windows raw sockets (IPv4 only, no Npcap). Receive only.
 
 ## Install
 
-I developed this project with Python 3.13. It should also work on Python 3.12 and newer (3.12 is the minimum in `pyproject.toml`): CI runs the tests on 3.12 and 3.13, on Linux and Windows, and you are welcome to try it yourself.
+Python 3.12+ (developed on 3.13).
 
 ```
 pip install -e ".[dev]"
@@ -40,548 +25,84 @@ pip install -e ".[dev]"
 
 ## Usage
 
-Print one tcpdump-style line per packet. The file can be classic pcap or pcapng (Wireshark's default); the format is picked from the first bytes of the file, not from its name:
-
 ```
-python -m sentinel read capture.pcap
-python -m sentinel read capture.pcapng
-```
-
-Generate a small synthetic capture that covers every supported protocol, then read it:
-
-```
-python tools/gen_pcap.py demo.pcap
-python -m sentinel read demo.pcap
+python -m sentinel read capture.pcapng [--filter EXPR]
+python -m sentinel flows capture.pcap [--filter EXPR]
+python -m sentinel ids capture.pcap [--rules rules/] [--format json|text]
+sudo python -m sentinel live eth0 [--filter EXPR] [--write out.pcap] [--count N] [--duration S] [--ids]
+python -m sentinel live 192.168.1.20      # Windows, Administrator: interface by IPv4 address
 ```
 
-`python tools/gen_pcap.py --pcapng demo.pcapng` writes the same packets as pcapng, and `read`, `flows` and `ids` give the same output for both.
+`tools/gen_pcap.py` writes synthetic captures: default (every protocol), `--streams`, `--attacks`, `--benign`, `--pcapng`.
 
 ```
-2023-11-14 22:13:20.000000 ARP, Request who-has 10.0.0.2 tell 10.0.0.1, length 28
-2023-11-14 22:13:20.001000 ARP, Reply 10.0.0.2 is-at 02:00:00:00:00:02, length 28
-2023-11-14 22:13:20.002000 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 1, seq 1, length 40
-2023-11-14 22:13:20.003000 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 1, seq 1, length 40
-2023-11-14 22:13:20.004000 IP 10.0.0.2 > 10.0.0.1: ICMP destination unreachable, code 3, length 36
-2023-11-14 22:13:20.005000 IP 10.0.0.1.40000 > 10.0.0.2.80: Flags [S], seq 1000, win 64240, options [mss 1460,sackOK,TS val 1000 ecr 0,nop,wscale 7], length 0
-2023-11-14 22:13:20.006000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [S.], seq 5000, ack 1001, win 64240, options [mss 1460,sackOK,TS val 1000 ecr 0,nop,wscale 7], length 0
-2023-11-14 22:13:20.007000 IP 10.0.0.1.40000 > 10.0.0.2.80: Flags [.], seq 1001, ack 5001, win 64240, length 0
-2023-11-14 22:13:20.008000 IP 10.0.0.1.40000 > 10.0.0.2.80: Flags [P.], seq 1001, ack 5001, win 64240, length 38: HTTP: GET / HTTP/1.1, host example.test
-2023-11-14 22:13:20.009000 IP 10.0.0.1.40000 > 10.0.0.2.80: Flags [F.], seq 1039, ack 5001, win 64240, length 0
-2023-11-14 22:13:20.010000 IP 10.0.0.1.53000 > 10.0.0.2.53: UDP, length 29: DNS query 48879, A? example.com
-2023-11-14 22:13:20.011000 vlan 100, IP 10.0.0.1.53001 > 10.0.0.2.53: UDP, length 29: DNS query 48879, A? example.com
-2023-11-14 22:13:20.012000 IP6 2001:db8::1.41000 > 2001:db8::2.443: Flags [S], seq 1, win 65535, length 0
-2023-11-14 22:13:20.013000 IP6 2001:db8::1.53002 > 2001:db8::2.53: UDP, length 29: DNS query 48879, A? example.com
-2023-11-14 22:13:20.014000 IP 10.0.0.1.53003 > 10.0.0.2.53: UDP, length 33: DNS query 4660, A? www.example.com
-2023-11-14 22:13:20.015000 IP 10.0.0.2.53 > 10.0.0.1.53003: UDP, length 63: DNS response 4660 NOERROR, A? www.example.com, answers [CNAME example.com, A 192.0.2.1]
-2023-11-14 22:13:20.016000 IP 10.0.0.1.42000 > 10.0.0.2.53: Flags [P.], seq 1, ack 1, win 64240, length 31: DNS query 17185, AAAA? example.com
-2023-11-14 22:13:20.017000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [P.], seq 5001, ack 1039, win 64240, length 77: HTTP: HTTP/1.1 200 OK
-2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
-```
-
-Timestamps are UTC with microsecond precision, so the output does not depend on the machine's time zone. Anomalies and errors are appended to a line as `[...]`, for example `[bad ipv4 header checksum]`.
-
-Only the packets that match a filter (see the filter language below):
-
-```
-python -m sentinel read demo.pcap --filter "tcp and (port 80 or port 443) and not src host 10.0.0.1"
-```
-
-```
-2023-11-14 22:13:20.006000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [S.], seq 5000, ack 1001, win 64240, options [mss 1460,sackOK,TS val 1000 ecr 0,nop,wscale 7], length 0
-2023-11-14 22:13:20.012000 IP6 2001:db8::1.41000 > 2001:db8::2.443: Flags [S], seq 1, win 65535, length 0
-2023-11-14 22:13:20.017000 IP 10.0.0.2.80 > 10.0.0.1.40000: Flags [P.], seq 5001, ack 1039, win 64240, length 77: HTTP: HTTP/1.1 200 OK
-```
-
-A filter that does not parse is reported with a caret under the problem, and the exit code is 2:
-
-```
-$ python -m sentinel read demo.pcap -f "tcp and port http"
-sentinel: invalid filter: expected a port number (0-65535), got 'http'
-  tcp and port http
-               ^
-```
-
-Group packets into flows, reassemble the TCP streams and print one line of statistics per flow:
-
-```
-python -m sentinel flows capture.pcap
-```
-
-`read` looks at one packet at a time. `flows` looks at whole streams, so it handles what `read` cannot: reordered and repeated segments, and messages split across segments. A second demo capture is made for it:
-
-```
-python tools/gen_pcap.py --streams streams.pcap
-python -m sentinel flows streams.pcap
-```
-
-```
-tcp 10.0.0.1:44000 > 10.0.0.2:8080: closed, pkts 8/3, bytes 129/40, 0.010000s [1 retransmitted client segment] [1 out-of-order client segment] | -> HTTP: POST /upload HTTP/1.1, host files.test | <- HTTP: HTTP/1.1 200 OK
-tcp 10.0.0.1:45000 > 10.0.0.2:8443: established, pkts 4/1, bytes 161/0, 0.004000s [1 out-of-order client segment] | -> TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
-tcp 10.0.0.1:46000 > 10.0.0.2:53: established, pkts 4/1, bytes 66/0, 0.004000s | -> DNS query 1, A? example.com | -> DNS query 2, AAAA? www.example.com
-tcp 10.0.0.1:47000 > 10.0.0.2:80: closing, pkts 5/1, bytes 160/0, 0.005000s [100 client bytes missing]
-tcp 10.0.0.1:48000 > 10.0.0.2:22: reset, pkts 1/1, bytes 0/0, 0.001000s
-udp 10.0.0.1:53004 > 10.0.0.2:53: pkts 1/1, bytes 33/63, 0.001000s | -> DNS query 4660, A? www.example.com | <- DNS response 4660 NOERROR, A? www.example.com, answers [CNAME example.com, A 192.0.2.1]
-# 6 flows, 31 packets in flows, 1 not in a flow
-```
-
-Run the detectors over a capture and print alerts, one JSON object per line:
-
-```
-python tools/gen_pcap.py --attacks attacks.pcap
-python -m sentinel ids attacks.pcap --format text
-python -m sentinel ids attacks.pcap --rules rules/
-```
-
-```
+$ python -m sentinel ids attacks.pcap --format text
 2023-11-14T22:13:20.140000Z [medium] port-scan: 10.9.9.1 probed 15 ports on 10.0.0.30 in 0.1s
-2023-11-14T22:13:23.700000Z [medium] port-scan: 10.9.9.2 probed 15 ports on 10.0.0.30 in 0.7s
-2023-11-14T22:13:24.700000Z [medium] port-scan: 10.9.9.3 probed 15 ports on 10.0.0.30 in 0.7s
-2023-11-14T22:13:25.700000Z [medium] port-scan: 10.9.9.4 probed 15 ports on 10.0.0.30 in 0.7s
-2023-11-14T22:13:29.160000Z [medium] port-scan: 10.9.9.5 probed port 22 on 30 hosts in 1.2s
 2023-11-14T22:13:32.099000Z [high] syn-flood: 100 SYNs to 10.0.0.2:80 in 0.1s from 100 sources, 20 completed
 2023-11-14T22:13:41.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:aa:00:00:00:01 to 02:ee:00:00:06:66
-2023-11-14T22:13:42.000000Z [high] arp-spoof: ARP says 10.0.0.1 is at 02:aa:00:00:00:01, but the frame came from 02:ee:00:00:06:66
-2023-11-14T22:13:42.000000Z [high] arp-spoof: 10.0.0.1 moved from 02:ee:00:00:06:66 to 02:aa:00:00:00:01
-2023-11-14T22:13:50.000000Z [medium] dns-tunnel: 10.0.5.5 asked for a random-looking name under evil-cdn.test
 2023-11-14T22:13:52.450000Z [medium] dns-tunnel: 10.0.5.5 asked for 50 different subdomains of evil-cdn.test in 2.5s
-2023-11-14T22:13:55.000000Z [medium] dns-tunnel: 10.0.5.6 asked for a very long name under example.org (124 characters)
-2023-11-14T22:13:56.951000Z [medium] dns-tunnel: 10.0.6.6 received 20 'no such name' answers in 0.9s
-2023-11-14T22:14:00.902000Z [medium] ssh-brute-force: 10.9.9.6 made 10 connections to the SSH port of 10.0.0.31 in 0.9s
-2023-11-14T22:14:05.850000Z [medium] icmp-tunnel: 10.0.8.8 got 5 echo replies from 10.0.0.40 that do not repeat the data it sent, in 0.8s
-2023-11-14T22:14:06.800000Z [medium] icmp-tunnel: 10.0.8.8 sent 10 echo requests of 512 bytes or more to 10.0.0.40 in 1.8s
 ```
 
-The same capture with `--format json` (the default) gives one object per alert with the fields `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence`. `python tools/gen_pcap.py --benign benign.pcap` writes busy but harmless traffic, and `ids` prints nothing for it.
+Exit codes: `0` success, `1` unreadable capture or capture failure, `2` bad filter, rules or options.
 
-Capture from a network interface (Linux as root, Windows as Administrator; it listens only). Use it only on a network you own or may monitor:
-
-```
-sudo python -m sentinel live eth0
-sudo python -m sentinel live eth0 --filter "tcp and port 443" --write web.pcap --duration 60
-sudo python -m sentinel live eth0 --ids --format text
-```
-
-The first prints the same lines as `read`, as the packets arrive. The last runs the detectors and prints each alert when it is raised. Ctrl-C stops the capture, and a summary line goes to stderr: `# 812 packets, 3 dropped by the kernel`.
-
-On Windows, from an Administrator prompt, the interface is named by its IPv4 address (the one `ipconfig` shows; `127.0.0.1` is the loopback). Only IPv4 is captured, see Stage 12:
-
-```
-python -m sentinel live 192.168.1.20 --filter "tcp and port 443" --duration 60
-```
-
-## Results
-
-| What | Result |
-|------|--------|
-| Tests | 942 pass here, 6 more need Linux and root and 5 more need Windows and Administrator rights; ruff and strict mypy are clean |
-| CI | GitHub Actions: Python 3.12 and 3.13 on Ubuntu and Windows, and the live capture tests on a real interface as root on Ubuntu (green) and as Administrator on Windows (stage 12): 6 jobs, all green after one fix (Stage 12 tells it) |
-| Sabotage | 405 deliberate one-line breaks of the code, every one caught by the tests |
-| Fuzzing | 3,000,000 damaged packets and capture files, pcap and pcapng, through the whole pipeline (seed 12): 0 failures |
-| tshark | 10 captures (6 public ones from other people's networks), 2,987 packets, 68,756 field values compared with Wireshark's `tshark`: 0 unexplained differences, after 3 bugs found in Sentinel and fixed |
-| Real traffic | 2,716,636 packets in 7 captures made by other people (211 MB): the detector for the attack fired on all 5 attack captures. On the 2 captures nobody labelled (a week at a web server, and 14.6 s of a 1 Gbps backbone) a recount from `tshark`'s output found the same scanning sources as Sentinel (16 and 376), none missed and none added; 165 DNS alerts on the backbone are probably false alarms. No code changed (Stage 13) |
-| Speed | 98,710 packets/s to decode, 44,135 to print `read` lines, 42,033 through the detectors, 34,551 through the `live` loop (one desktop CPU core, Python 3.13.5); 50,394 through the detectors on the backbone slice, a third of the link's own rate |
-| Demo output | the `read`, `flows` and `ids` blocks above are the real output, checked as golden tests |
-
-## Stage 1: pcap I/O and L2-L4 parsers
-
-**pcap.** Classic pcap, read and written in both byte orders and both time units (microsecond and nanosecond magic numbers). Timestamps are kept as integer nanoseconds, so a write-then-read round trip is exact. The reader streams from the file and rejects records with a captured length above 262,144 bytes. A corrupt record raises `PcapError` only after all earlier packets have been yielded.
-
-**Parsers.** Ethernet (with stacked 802.1Q/802.1ad tags), ARP, IPv4, IPv6 (fixed header), TCP (flags, options), UDP and ICMP. Every parser is bounds-checked and never raises on bad input. Each returns a dataclass that carries:
-
-- `error`: the header could not be parsed. Every other field is a default and means nothing.
-- `anomalies`: the header parsed, but something is off (bad checksum, truncated capture, inconsistent length). The packet is kept and the oddity is reported.
-- `payload`: the bytes after the header, trimmed to the length the header declares.
-
-```python
->>> from sentinel.proto.tcp import parse_tcp
->>> parse_tcp(bytes(12)).error
-'truncated tcp header: 12 of 20 bytes'
-```
-
-`sentinel.proto.decode.decode(frame)` runs the parsers in order and returns the layers as a tuple, for example `(Ethernet, IPv4, Tcp)`. It stops at the first layer with an error, an unknown protocol or an IP fragment.
-
-**Checksums.** IPv4 header and ICMP checksums are verified. TCP and UDP checksums are verified only when the whole segment was captured, so a packet cut short by the snap length never reports a false bad checksum. Captures taken on the sending host can show bad TCP/UDP checksums because of NIC checksum offload; these are reported as anomalies, not errors.
-
-**Tests.** 106 tests at the end of the stage, including a valid, truncated, malformed and random-bytes case per parser, pcap round trips for all four file variants, and fixed-seed fuzzing: every truncation and every single-byte corruption of the generated packets, plus random bytes. All traffic in the repo is synthetic.
-
-## Stage 2: DNS, HTTP and TLS ClientHello
-
-`decode()` now goes one layer further, for example `(Ethernet, IPv4, Udp, Dns)` or `(Ethernet, IPv4, Tcp, TlsClientHello)`. The new parsers follow the same contract as before: they never raise, and report trouble through `error` and `anomalies`.
-
-**DNS** (`parse_dns`). Header flags, questions, and answer/authority/additional records, with compression pointers followed safely: a pointer must point backward into the message, at most 32 are followed, and names are capped at 255 bytes. Record data is decoded to text for A, AAAA, NS, CNAME, PTR, MX and TXT, and the raw bytes are always kept. Only an unreadable header is an `error`; a broken record ends parsing as an anomaly and keeps the records before it. Detected by port 53, over UDP, or over TCP when the whole length-prefixed message is in one segment.
-
-**HTTP** (`parse_http`). HTTP/1.x request and status lines, headers (case-insensitive `header()` lookup) and the body bytes present in the segment. Detected by content (a request method or `HTTP/1.` at the start of the payload), so any port works. Limits: 8 KB start line, 16 KB of headers, 100 headers. Conflicting or non-numeric `Content-Length` values are reported as anomalies.
-
-**TLS ClientHello** (`parse_client_hello`). Server name (SNI), the versions offered, the cipher suite list and the extension ids. Detected by content. GREASE values are kept in the data and hidden in the printed line.
-
-**Safe to print.** Names, header values and the SNI come from the network, so parsers escape them: control and escape characters become `\xNN`, and DNS labels use RFC 4343 escapes. A hostile packet cannot inject terminal escape sequences into the output.
-
-**One segment at a time.** `read` and `decode()` see one segment at a time (streams are handled by `flows`, stage 3). A DNS-over-TCP message split across segments gets no DNS layer, HTTP headers cut off by a segment are parsed as far as they go with an anomaly, and a ClientHello split across segments is parsed as far as it is present with a `truncated client hello` anomaly.
-
-**Tests.** 162 tests at the end of the stage. Each parser has valid hand-built bytes, every truncation, malformed cases with the exact anomaly text checked, and seeded random bytes. The decode fuzz tests cover the new generated packets. A sabotage run broke 16 lines across stages 1 and 2 on purpose, and every break was caught by at least one test (see stage 3 for the current run).
-
-## Stage 3: flows and TCP stream reassembly
-
-**Flows** (`FlowTable`). Packets are grouped into bidirectional TCP and UDP flows by protocol and the two (address, port) endpoints. The client is whoever sent the SYN. A new flow starts when the same endpoints are used again after the old one ended, when a SYN arrives with a different initial sequence number, or after the flow sat idle (1 hour for TCP, 2 minutes for UDP). Each flow has packet and payload byte counts in each direction, duration, and a TCP state derived from the packets seen (`syn-sent`, `established`, `closing`, `closed`, `reset`, or `midstream` when no SYN was captured). ICMP, ARP, IP fragments and unparsable packets are not flows; they are only counted.
-
-**Reassembly** (`TcpStream`, one per direction). Segments arriving out of order, repeated or overlapping are put back into one byte stream, and sequence numbers may wrap around. Overlapping bytes: the first copy that arrived wins, and a later copy with different bytes is reported as a conflict, since that is how a sender confuses an IDS. Only the contiguous bytes from the start of the stream are returned; a gap is reported as missing bytes, never filled in. Counted per stream: retransmitted segments, out-of-order segments, missing bytes, conflicting overlaps, and bytes not buffered because of a limit.
-
-**Messages from streams.** DNS, HTTP and the TLS ClientHello are parsed from the reassembled streams, so a message split across segments is parsed whole. HTTP messages are read only at message boundaries, using `Content-Length` to skip bodies (parsing stops at a chunked body or one read until close), so a body that contains text like `GET /` is not mistaken for a request. DNS over TCP reads its length-prefixed messages one after another.
-
-**Limits, all counted and shown, never silent.** 1 MiB per stream from its start, 4,096 separate byte ranges per stream, 256 MiB buffered across all streams, 200,000 flows.
-
-**Output.** One line per flow, in the order the flows started, then a `#` footer. The same capture always gives the same text.
-
-**Tests.** 226 tests in total. A property test cuts 300 random payloads into overlapping, duplicated pieces, shuffles them, places the SYN anywhere (including last) and starts sequence numbers near the 32-bit wrap; the stream must equal the payload. The same check runs through `FlowTable` with real packets. A sabotage run now breaks 33 lines across stages 1 to 3 on purpose, and every break is caught by at least one test. While writing these tests a stage 2 bug turned up (an empty line reported as a malformed HTTP header when a segment ended at a line break); it is fixed.
-
-## Stage 4: filter language
-
-`--filter EXPR` (or `-f`) works on both `read` and `flows`. It selects packets before anything else, so `flows` builds its flows from the matching packets only. Keeping whole conversations works with endpoint filters (`host`, `port`, `tcp`). A filter that drops some packets of a connection (for example `http`) leaves a partial flow, and reassembly reports the missing bytes.
-
-**Language.**
-
-| Word | Matches |
-|------|---------|
-| `ip`, `ip6`, `arp`, `tcp`, `udp`, `icmp` | packets that have that layer |
-| `dns`, `http`, `tls` | packets with that application layer (TLS means a ClientHello) |
-| `ja3 HASH` | ClientHello packets whose JA3 fingerprint is HASH (32 hex digits, any case), see Stage 11 |
-| `vlan`, `vlan 100` | any VLAN tag, or a tag with that id (any tag of a stacked pair) |
-| `host 10.0.0.1`, `host 2001:db8::1` | that address as source or destination (also ARP sender and target) |
-| `net 10.0.0.0/8` | an address inside that network |
-| `port 80`, `portrange 5000-6000` | TCP or UDP port |
-| `src ...`, `dst ...` before `host`, `net`, `port` or `portrange` | only that side |
-| `not`, `!` / `and`, `&&` / `or`, `||`, `( )` | combine; `not` binds tighter than `and`, which binds tighter than `or` |
-
-A protocol followed by a qualifier is an implicit `and`: `tcp port 80` is `tcp and port 80`. Keywords are case-insensitive. Host names are not looked up; use addresses.
-
-**Errors are values.** `parse_filter(text)` never raises. It returns a `Filter` whose `error` and `position` say what is wrong and where, and `Filter.matches(layers)` is false for a filter with an error. The limits: nesting of 100 levels, 1,000 tokens, numbers of up to 10 digits, so a hostile or accidental filter cannot exhaust the parser.
-
-**Meaning, in detail.** A protocol word is true when that layer is present, even if it has an error (a broken TCP header is still a TCP packet). `host`, `net` and `port` need an intact header, so an errored layer never matches (its default zeros do not match `port 0` or `host 0.0.0.0`). IPv4 and IPv6 never match each other's networks. IP fragments are not decoded past the IP header, so they match `ip` and `host` but not `tcp` or `port`.
-
-**Tests.** 331 tests in total. The evaluator is compared with hand-written predicates for 34 primitives over an 80-packet corpus (both demo captures, fragments, cut headers, stacked VLAN tags, garbage), and 400 random `and`/`or`/`not` combinations are compared with Python's own logic. The parser is tested with exact trees, 31 error messages and positions, random trees that must print and parse back to the same tree, and thousands of random texts that must never raise. A sabotage run now breaks 59 lines across stages 1 to 4 on purpose, and every break is caught by at least one test.
-
-## Stage 5: IDS engine
-
-`python -m sentinel ids capture.pcap [--rules PATH] [--format json|text]` runs the detectors over a capture, in capture order, and prints an alert for each finding. Detectors work on packets and only see intact layers. Alerts are sorted by the time of the packet that raised them, then by the rule's position, so the same capture and rules always give the same output.
-
-**Detectors.**
-
-| Detector | Looks for | Default | Expect false positives from |
-|----------|-----------|---------|-----------------------------|
-| `port_scan` | one source probing many ports of one host, or one port of many hosts; TCP SYN and the stealth scans (no flags, FIN only, FIN+PSH+URG) count | 15 ports or 30 hosts within 10 s | vulnerability scanners you run yourself |
-| `syn_flood` | many SYNs to one address and port, few completed by the handshake's ACK | 100 SYNs within 1 s, at most 30% completed | a burst of connections to a server that then stops answering |
-| `arp_spoof` | an IP address that moves to another MAC address; an ARP sender MAC that differs from the Ethernet source; address probes from 0.0.0.0 are ignored | any change | a replaced network card, a failover pair |
-| `dns_tunnel` | a name of 100+ characters or a label of 50+; a random-looking subdomain (4.2 bits per character, 40+ characters); 50 different subdomains of one domain in 60 s; 20 "no such name" answers to one client in 60 s | as listed | long generated names of some CDNs and security products |
-
-Entropy alone does not separate tunnels from readable names: base32 and base64 subdomains land mostly above 4.2 bits per character, hex-encoded ones stay below it, and long readable hostnames reach about 4.1. The three other DNS signals exist for that reason.
-
-**Rules.** TOML files, read with the standard library. `--rules` takes a file or a directory (every `*.toml`, in name order); without it the built-in defaults are used, and `rules/default.toml` spells them out (a test keeps the two equal).
+### Rules
 
 ```toml
 [[rule]]
-id = "ssh-scan"              # required, unique: a-z, 0-9, '-' and '_'
-detector = "port_scan"       # required
-severity = "high"            # optional: low, medium, high or critical
-enabled = true               # optional
-filter = "dst port 22"       # optional: the detector only sees packets that match (stage 4 language)
-distinct_hosts = 5           # the rest are the detector's own parameters
-distinct_ports = 0           # 0 turns a check off
+id = "ssh-scan"
+detector = "port_scan"
+severity = "high"            # low | medium | high | critical
+filter = "dst port 22"       # optional, filter language
+distinct_hosts = 5
+distinct_ports = 0           # 0 disables the check
 window_seconds = 30
 ```
 
-Loading never raises. Every problem in every file is reported at once, with the file and rule number, and the command exits with 2. Parameters are typed and range-checked, and an unknown key is an error, so a typo cannot silently keep a default. Several rules may use the same detector.
-
-**Alerts.** One JSON object per line with sorted keys and ASCII only: `ts`, `ts_ns`, `rule`, `detector`, `severity`, `src`, `dst`, `message` and `evidence` (the numbers behind the alert). `--format text` prints `time [severity] rule: message`. One attack gives one alert per source, target and window, not one per packet.
-
-**Exit codes.** 0 when the capture was read, with or without alerts; 1 when the capture is unreadable or corrupt (the alerts raised before the corrupt record are still printed); 2 for bad rules.
-
-**Limits.** Every detector keeps bounded state (100,000 keys, capped sliding windows, oldest half-open handshakes dropped first). When a limit forces a packet to be ignored, the run ends with a low-severity alert that says how many.
-
-**Tests.** 441 tests in total. `tools/gen_pcap.py --benign` writes 647 packets (700 since stage 10) kept just below every threshold (150 completed handshakes in one second, 14 ports of one host, 25 hosts on one port, 40 subdomains, long readable names, repeated ARP announcements): it must raise no alert. `--attacks` writes one of each attack and must raise exactly 13 alerts (16 since stage 10), listed one by one in the tests. Every detector is tested one below its threshold, at it, at the window edge and switched off, and the engine is fuzzed with random frames, truncations, corruptions and scrambled timestamps.
-
-## Stage 6: live capture
-
-`python -m sentinel live INTERFACE [--filter EXPR] [--write FILE] [--count N] [--duration SECONDS] [--ids [--rules PATH] [--format json|text]]` reads Ethernet frames from a Linux packet socket (`AF_PACKET`) and sends them through the pipeline the other commands use: decode, filter, then print (or, with `--ids`, run the detectors). The socket only receives; nothing is ever sent. Opening it needs root or the `CAP_NET_RAW` capability, and the interface is always named on the command line (there is no default).
-
-**Output.** One line per packet, in the `read` format, or with `--ids` one alert as soon as it is raised. Every line is flushed, so a pipe sees it at once. `--write FILE` saves the packets that match the filter as a pcap file, flushed after every packet, so a capture that is killed still leaves a readable file. `--count N` stops after N matching packets, `--duration S` after S seconds, and Ctrl-C at any time. When it ends, one line goes to stderr with the number of packets and, if the kernel reports any, how many it dropped because the program was too slow. With `--ids`, alerts about detector state limits are printed at that point.
-
-**Exit codes.** 0 when the capture ran and ended normally, including by Ctrl-C; 1 when it cannot start (no such interface, not Ethernet, not Linux, no permission, a `--write` file that cannot be opened) or fails while running; 2 for a bad filter, bad rules or bad options. All three are checked before the interface is opened.
-
-**Details.**
-
-- Timestamps are the system clock at the moment the program receives a packet, as integer nanoseconds. Written to a pcap file they are microseconds, like every other capture this project writes.
-- The interface must be Ethernet (`/sys/class/net/NAME/type` is 1) or loopback. The name is checked with the kernel's own rules before it is used in a path.
-- On the loopback interface the kernel hands out every packet twice, once leaving and once arriving. The leaving copy is dropped, so each packet appears once. (Checked in CI on a Linux 6.17 runner: a datagram comes out twice with the drop switched off, once with it on.)
-- The receive wait is 0.5 s, so a time limit and Ctrl-C are noticed on a quiet network.
-
-**Long runs.** A live capture can meet more sources than a file does. Until this stage the detectors kept one sliding window per source, target or client for ever, so after 100,000 different ones they would have stopped watching new ones. Each table is now kept in order of last use, and a key that has been idle for longer than its window is forgotten (its window would be empty anyway). Found while designing this stage, and tested at the boundary: a key is kept for exactly one window and forgotten one microsecond later. The engine gained `pop_alerts()`, which hands out the alerts raised so far and forgets them, so a run of any length does not keep them all. A packet refused by a full port-scan table used to be counted twice in the state-limit alert (the detector has two tables); it is counted once.
-
-**Tests.** 526 run everywhere, and 4 more run only on Linux as root. The packet socket is replaced by a stand-in that hands out the frames of the generated captures, and the clock replays their timestamps, so the output of `live` must be exactly what `read` and `ids` print for the same capture: the same 13 alerts for the attack capture, printed at the packet that raised them and not at the end. Also tested: `--count`, `--duration` and Ctrl-C, the filter applied before counting and writing, the file readable while the capture runs, packets read back from `--write` equal to the ones captured, every error and its exit code, interface names and link types (against a folder that stands for `/sys/class/net`), the drop counter, random and cut-off frames through both modes, and the detector tables at the window edge. `tests/test_live_linux.py` captures a UDP datagram on the loopback interface with a real socket. It is skipped elsewhere; run it with `sudo python -m pytest tests/test_live_linux.py`. It passed on a GitHub Ubuntu runner (see Stage 7).
-
-## Stage 7: benchmarks, fuzzer, CI
-
-**Benchmarks.** `python -m tools.bench [--packets N] [--repeat R] [--json]` measures how many packets per second each part handles. The traffic is the four generated captures one after the other, repeated with the time moved forward, so the workload is the same everywhere (about 65 bytes per packet on average: many small packets, as in the demo captures). Each stage runs `--repeat` times and the fastest run is kept. Every stage must handle every packet, or the run stops with an error instead of printing a number.
-
-Measured on AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD, 16 logical CPUs, Windows-11-10.0.26200-SP0, Python 3.13.5, 100,000 packets, fastest of 3 (one core is used; nothing runs in parallel):
-
-| Stage | packets/s | µs per packet | MB/s |
-|-------|-----------|---------------|------|
-| pcap read | 1,564,676 | 0.6 | 101.9 |
-| pcap write | 2,567,763 | 0.4 | 167.2 |
-| pcap write, flushed after every packet | 357,768 | 2.8 | 23.3 |
-| decode | 98,710 | 10.1 | 6.4 |
-| read: decode and print a line | 44,135 | 22.7 | 2.9 |
-| filter: decode and match | 65,206 | 15.3 | 4.2 |
-| flows: decode, reassemble, print | 59,330 | 16.9 | 3.9 |
-| ids: decode and run 4 detectors | 42,033 | 23.8 | 2.7 |
-| live loop, printing lines | 34,551 | 28.9 | 2.2 |
-| live loop, running the detectors | 37,716 | 26.5 | 2.5 |
-| live loop, saving to a file | 27,635 | 36.2 | 1.8 |
-
-Reading the table:
-
-- Decoding is about 10 µs per packet, and no single function dominates: in a profile of `decode`, IPv4 parsing, the dispatcher (`decode` itself), building `ipaddress` objects, TCP parsing and the checksums take 8 to 13% each, and the rest is spread thin. The stages above `decode` add their own work on top of it: printing a line costs about 13 µs more, the four detectors about 14 µs.
-- Every packet the `live` loop handles costs about 27 to 36 µs, so on this machine it keeps up with about 27,000 to 38,000 small packets per second, about 2 MB/s of 65-byte packets. Faster traffic is dropped by the kernel, and the summary line at the end says how many. Speed was measured, not tuned: nothing was changed to make a number better.
-- Flushing after every packet costs about 2.4 µs per packet (2.8 against 0.4 µs to write). That is a tenth of the `live` loop, and it buys a capture file that is readable even if the process is killed.
-- Numbers depend on the machine. Run the tool on yours. CI runs a small version on GitHub's runners (4 logical CPUs, 20,000 packets, one run each, so noisier):
-
-| Stage (packets/s) | my machine | Ubuntu, Python 3.12 | Ubuntu, Python 3.13 | Windows, Python 3.12 | Windows, Python 3.13 |
-|---|---|---|---|---|---|
-| decode | 98,710 | 59,831 | 56,736 | 115,977 | 61,334 |
-| read: decode and print a line | 44,135 | 33,416 | 26,335 | 67,282 | 28,174 |
-| ids: decode and run 4 detectors | 42,033 | 28,788 | 25,198 | 57,074 | 26,715 |
-| live loop, printing lines | 34,551 | 27,389 | 21,929 | 55,896 | 22,174 |
-| pcap write, flushed after every packet | 357,768 | 369,740 | 406,820 | 483,074 | 118,459 |
-
-  The runners are not one machine: the Windows 3.12 log reports a newer AMD processor (family 26, against 25 in the other Windows log) and is almost twice as fast as the Windows 3.13 run, so compare within a column and only roughly across them. The Ubuntu runners and one Windows runner are slower than my machine at decoding, the other Windows runner is faster. Flushing after every packet adds 1.6 to 7.7 µs per packet across the four runs (2.4 µs on my machine), so that cost varies a lot with the machine.
-
-**Fuzzer.** `python -m tools.fuzz [--seed S] [--iterations N]` damages packets from the generated captures (a flipped bit, a length field set to an extreme, a cut, a piece deleted or repeated, the end of another packet spliced on; one to three damages each) and sends them through the decoder, the summary line, eight filters, one flow table and one detector engine that live for the whole run. Every fifth input is a small capture file, damaged the same way, read by the pcap reader. A failure is an exception (only `PcapError` may come out of the reader), a summary line that is not one line of printable ASCII, or an alert that is not one line of JSON. The same seed makes the same inputs, and a failing packet is printed as hex that `--replay` runs on its own. A run of 3,000,000 inputs (seed 7, 2,400,000 packets and 600,000 capture files) found nothing. That is a result about these inputs and these checks, not a proof: the damages are random, and the checks are only the ones listed. To see what the fuzzer is worth, each of the 148 deliberate breaks of stages 1 to 6 was applied to the code and the fuzzer run alone on it (30,000 inputs): it caught 2 (a control character in a printed line, and a `KeyError` in the SYN flood detector). The tests catch all 148. The fuzzer finds crashes and malformed output, not wrong answers.
-
-**CI.** `.github/workflows/ci.yml` runs ruff, `ruff format --check`, mypy strict, the tests, 200,000 fuzz inputs (the seed is the run number, so a failure can be repeated) and a small benchmark, on Python 3.12 and 3.13, on Linux and Windows. A second job runs `tests/test_live_linux.py` as root on a Linux runner and fails if those tests were skipped, so it is where the real packet socket is used for the first time. It took four pushes to get all five jobs green. The first two ran no job at all: a step name contained `: `, which YAML reads as another key, so GitHub refused the file (`tests/test_ci.py` now checks for that mistake). Then Python 3.12 on Windows failed one test, which compared a wait against the 0.05 s time limit without allowing for float rounding on a large clock reading (the code was right; the test now has a tolerance of a microsecond). After that every job passed, including the one that runs `tests/test_live_linux.py` as root: on the loopback interface of a Linux runner, the real packet socket captured a UDP datagram, decoded it, and the command line saved it. Later runs of that job also showed that the datagram is captured exactly once, and exactly twice when the copy filter is switched off (5 passed and 1 skipped: the test for running without root skips itself when the job is root, as it should). `tests/test_ci.py` also checks that the workflow runs every command listed under Development below, in order, on Python 3.12 and 3.13. The fuzzer ran 200,000 inputs on each of the four Python and system combinations (the seed is the run number: 3 and 4): 0 failures.
-
-**Tests.** 626 in total (620 run here; 6 need Linux and root). The benchmark: the corpus is the four captures in order with each capture starting one second after the last ended, repeats keep the time moving forward, the timer keeps the fastest run, a stage that handles the wrong number of packets is an error, the flushed writer really is flushed (the file on disk is checked before each packet), the live stages print nothing and restore the command. The fuzzer: every damage checked against its definition (including brute force over every possible slice), the same seed giving the same run, every kind of failure detected with a substituted component that misbehaves (an exception, a summary with a control character, a filter that does not answer, an alert that is not JSON, a flow line with a line break, a pcap reader that raises something other than `PcapError`), and every option.
-
-## Stage 8: pcapng
-
-**Why.** Wireshark has saved pcapng by default for years, and the reader only knew classic pcap, so most captures a user makes today were refused (`not a pcap file: bad magic 0a0d0d0a`). Now `read`, `flows` and `ids` take either format. `open_reader` picks the reader from the first four bytes: a pcapng file starts with the section header `0a 0d 0d 0a`, which is the same in both byte orders and none of the classic magic numbers. The file name does not matter.
-
-**Reader.** `sentinel/pcap/pcapng.py`, 183 lines, standard library only. Blocks are type, length, body, length again. It reads section headers, interface descriptions, enhanced packet blocks and simple packet blocks, and skips every other block by its length (name resolution, interface statistics, decryption secrets, custom blocks). The byte order is per section, from the byte-order magic, and a new section forgets the interfaces of the old one. Timestamps become integer nanoseconds like the classic reader's, from each interface's `if_tsresol` (powers of 10 or of 2, microseconds by default) and `if_tsoffset`, with integers only: a nanosecond timestamp of today needs 61 bits and a float keeps 53. A timestamp before 1970 or after the year 9999 is refused, because the summary line could not print it. A simple packet block has no timestamp, so it takes the time of the packet before it. The link type of the file is the first interface's, and a packet on an interface with another link type is an error, not something decoded as Ethernet by mistake.
-
-**Bad files.** Like the classic reader it raises `PcapError` only, after yielding the packets before the damage. It refuses a block length that is under 12 (28 for a section header), not a multiple of 4, or over 16 MiB, a length that is not repeated at the end of the block, a block cut short, a version other than 1, a packet for an interface that was not described, a captured length over 262,144 or past the end of the block, an interface option of the wrong size or one that runs past its block, and an out-of-range timestamp.
-
-**Checked against.** My tests build their files block by block from the format description, not with my generator. As a separate check, an independent implementation, `python-pcapng` 2.1.1 (installed in a scratch folder, not a dependency and not part of the tests), wrote files that this reader read, and read files that `tools/gen_pcap.py --pcapng` wrote: 12 combinations of byte order and timestamp resolution (66 packets) one way and 2,190 packets the other way, all equal to the nanosecond. Stage 9 later checked it against files that Wireshark wrote.
-
-**Fuzzing.** The fuzzer now makes half of its capture files pcapng, and splices files of the two formats together. A run of 3,000,000 inputs (seed 8: 2,400,000 packets and 600,000 capture files, half of them pcapng) found nothing. As in stage 7, that is a result about these inputs and these checks, not a proof.
-
-**Tests.** 727 run here (107 new, 84 of them in `tests/test_pcapng.py`), and 6 need Linux and root. Every resolution, both byte orders, several sections and interfaces, skipped blocks, simple blocks, every refusal with its message, both ends of the timestamp range (the last accepted second must be printable, the next must not be), every prefix of a valid file in both byte orders and every byte replaced in turn (the reader may only raise `PcapError`, and a cut at a block boundary must be a prefix of the real packets), and `read`, `flows` and `ids` giving the same output for the pcap and the pcapng version of each of the four generated captures. Sabotage: 57 new one-line breaks (253 in all), every one caught. Three of them made the first run hang instead of fail; the cause was pytest building a diff of two 647-line outputs after a failed comparison, not the code, and the test now reports the first different line instead.
-
-## Stage 9: compared with tshark
-
-**Why.** Everything up to stage 8 was tested against traffic I generated and against my own reading of the protocols, so a misreading of mine could be in both. `tshark` is written by other people and has read far more traffic. This stage compares the two, and fixes what differs.
-
-**The tool.** `python -m tools.compare_tshark CAPTURE...` is a development tool: it needs Wireshark's `tshark` (found on `PATH`, in the `TSHARK` variable, in the default Windows folder, or with `--tshark PATH`) and nothing in Sentinel needs it. It runs `tshark` with reassembly, sequence analysis and defragmentation switched off, because `read` looks at one packet at a time, and with checksums verified. It reads about 75 fields per packet (frame length, Ethernet and VLAN, ARP, IPv4, IPv6, TCP with its options, UDP, ICMP, DNS, HTTP, the TLS ClientHello) and compares each one with what Sentinel decoded, in the same form. It also compares the TCP and UDP conversations `tshark` numbers with the flows Sentinel finds (protocol, both ends, packet count; idle timeouts off, since `tshark` has none). A field that only one of them reports is listed apart. The exit code is 1 if anything differs that is not explained.
-
-**Results** (Wireshark 4.6.8):
-
-| Capture | From | Format | Packets | Values compared | Differences | Explained |
-|---------|------|--------|---------|-----------------|-------------|-----------|
-| `sample.pcap` | generated here | pcap | 19 | 529 | 0 | 20 |
-| `streams.pcap` | generated here | pcap | 32 | 892 | 0 | 27 |
-| `benign.pcap` | generated here | pcap | 647 | 17,906 | 0 | 156 |
-| `attacks.pcap` | generated here | pcap | 1,044 | 29,884 | 0 | 333 |
-| `dns.cap` | Wireshark sample captures | pcap | 38 | 1,356 | 0 | 57 |
-| `ipv4frags.pcap` | Wireshark sample captures | pcap | 3 | 57 | 0 | 0 |
-| `200722_win_scale_examples_anon.pcapng` | Wireshark sample captures | pcapng | 26 | 719 | 0 | 0 |
-| `v6.pcap` | Wireshark sample captures | pcap | 161 | 3,548 | 0 | 126 |
-| `vlan.cap` | Wireshark sample captures | pcap | 395 | 7,645 | 0 | 25 |
-| `arp-storm.pcap` | Wireshark sample captures | pcap | 622 | 6,220 | 0 | 0 |
-
-10 captures, 2,987 packets (1,245 of them from public captures), 68,756 field values, no unexplained difference. The public captures are small files from the Wireshark sample captures page (about 110 KB in all). They are not in this repository, which holds only traffic that I generated: download them to a folder next to it (`../sentinel-samples`), from `https://gitlab.com/wireshark/wireshark/-/wikis/uploads/__moin_import__/attachments/SampleCaptures/NAME`, with NAME one of `dns.cap`, `ipv4frags.pcap`, `200722_win_scale_examples_anon.pcapng`, `v6.pcap`, `vlan.cap.gz` (unpack it) and `arp-storm.pcap`.
-
-**Explained differences.** 744 field differences are not disagreements, and each is counted with its reason instead of being dropped:
-- 618 x: tshark shows these flags only in responses.
-- 76 x: tshark reads the packet quoted inside an ICMP error.
-- 25 x: an 802.3 frame with an LLC header: not decoded above Ethernet.
-- 21 x: a DNS message that is not whole in this segment (flows reads it).
-- 2 x: tshark shows the request that a response answers.
-- 2 x: a ClientHello that is cut short: tshark reads none of it.
-
-**What it found.** Three real bugs, all in captures made by other people:
-
-- *Checksum offload.* A capture made on the sending machine holds TCP and UDP checksums that the network card has not finished: the field is the sum of the pseudo-header alone, not complemented. In the `win_scale` capture 14 of 26 TCP packets were reported as `[bad tcp checksum]`. `tshark` calls them correct. Now a checksum that is exactly the partial sum is not reported as bad (this was the known false positive of the first stages). Any other wrong value still is.
-- *First IPv4 fragments.* A fragment was never decoded further, but the first one holds the transport header. `ipv4frags.pcap` printed an ICMP echo as `ip-proto-1`. Now the first fragment is decoded (its checksum cannot be verified, the message is not whole), later ones stop at the IP header. Filters and flows follow: `tcp` and `port` match a first fragment, and a first UDP fragment is a flow.
-- *802.3 frames.* A frame whose type field is below 0x0600 carries a length and an LLC header (spanning tree, NetBIOS). `read` printed the length as `ethertype 0x00a6`. It now prints `802.3`. Such frames are still not decoded above Ethernet, so ARP inside LLC/SNAP (in `vlan.cap`) is not seen.
-
-**Wireshark's own pcapng.** `editcap -F pcapng` (Wireshark 4.6.8) converted 9 of the captures, and this reader gave back the same 2,961 packets as the classic file, timestamps included. The `win_scale` capture is a pcapng that Wireshark wrote itself, and it compares clean. That closes what stage 8 could not check.
-
-**Tests.** 796 run here (69 new: the checksum, fragment and 802.3 changes, and `tests/test_compare_tshark.py`), and 6 need Linux and root. The tool is tested with rows written by hand in the form `tshark` prints them (every conversion, every rule for an explained difference and its limits, the arithmetic of a file, the report, the command line, the command that runs `tshark`), and with the real `tshark`, when it is installed (the generated captures in both formats must agree, and swapping one field of Sentinel's must be noticed for every packet that has it). Those last tests are skipped where `tshark` is missing, so CI does not run them. Sabotage: 46 new one-line breaks (299 in all), every one caught. Seven survived the first run, all in the tool's own tests (a rule that explained too much, a count that took either side, a line of `tshark` output with too many columns), and the tests were tightened. Fuzzing: 3,000,000 inputs (seed 9), 0 failures.
-
-**What this does not show.** Only header fields and conversation counts are compared, not the bytes of a reassembled stream, and only against one version of `tshark`. Six public captures of about 110 KB are a small sample of what a network sends. The two programs can be wrong in the same way, but they were written by different people from the same documents.
-
-## Stage 10: SSH brute force and ICMP tunneling
-
-Two more detectors, built like the four of stage 5: typed and range-checked parameters, a rule in `rules/default.toml` (a test keeps it equal to the built-in defaults), bounded state, one alert per attack and window, and the numbers behind the alert in `evidence`.
-
-| Detector | Looks for | Default | Expect false positives from |
-|----------|-----------|---------|-----------------------------|
-| `ssh_brute_force` | one client completing many TCP connections to the SSH port of one server (`port` sets another; copy the rule for a second port) | 10 completed connections within 60 s | backups, configuration tools, scripts that run `git` or `ssh` in a loop |
-| `icmp_tunnel` | data carried in ping (ICMP echo, IPv4 only): echo requests of 512 bytes or more, and echo replies whose data is not what the request carried | 10 large requests, or 5 changed replies, within 60 s | a run of large pings for an MTU test, a device that rewrites the data of replies |
-
-**SSH.** The traffic is encrypted, so a failed login cannot be seen. What can be seen is how often a client connects, and a tool that opens a new connection for every few guesses shows that rate. Only connections that complete the handshake count (the ACK that ends it is seen): half-open ones, refused ones and SYN scans are what `port_scan` and `syn_flood` are for, and a scan of port 22 should not also be a brute force. A retransmitted SYN is one connection, and the ACKs that follow on it do not count again. A server on another port needs its own rule, with `port`.
-
-**ICMP.** A real echo reply carries back exactly the data of its request, and a request carries a few dozen bytes (56 on Linux, 32 on Windows). A tunnel sends much more, and its replies carry other data. So there are two signals, each with a count and a window. For every request the detector keeps an 8-byte digest of its data, not the data, and compares it with the digest of the reply that has the same addresses, identifier and sequence number; a reply with no request in the capture is ignored, and so is anything that was not captured whole (a cut request would look small and a cut reply would look changed). ICMPv6 is not decoded, so a tunnel over IPv6 is not seen.
-
-**Thresholds.** They are guesses, like those of stage 5: I had no capture of real SSH guessing or of a tunnel. What I can say is where the generated captures sit. `--benign` (now 700 packets) has an admin opening 9 SSH connections in 8 seconds, 9 pings of 1400 bytes answered with the same data, and 4 replies with other data: it raises nothing, and the tests lower each threshold by one and check that it then raises exactly one alert. `--attacks` (now 1,174 packets, 16 alerts) adds a password guesser making 30 connections in 3 seconds and a tunnel of 20 pings of 800 random bytes answered with 800 other random bytes. Measured by asking the detectors with a higher and higher threshold, the most that one window holds is:
-
-| Signal | Threshold | Benign capture | Attack capture |
-|--------|-----------|----------------|----------------|
-| completed SSH connections in 60 s | 10 | 9 | 30 |
-| large echo requests in 60 s | 10 | 9 | 20 |
-| changed echo replies in 60 s | 5 | 4 | 20 |
-
-**Real traffic.** The six public captures of stage 9 (`dns.cap` (38), `ipv4frags.pcap` (3), `200722_win_scale_examples_anon.pcapng` (26), `v6.pcap` (161), `vlan.cap` (395), `arp-storm.pcap` (622)) raise no alert from these two detectors. That is a small test, and none of them has SSH or large pings in it. It did show a false positive of an older detector, see Limits.
-
-**Speed.** With the six default detectors the `ids` stage of the benchmark runs at 40,245 packets per second on this machine (42,033 with four in stage 7, decode 99,237). The benchmark stage is now called `ids: decode and run the default detectors`; the tables of stage 7 keep their measurements, made with four.
-
-**Tests.** 851 run here (55 new, 55 of them in `tests/test_ids_ssh_icmp.py`), and 6 need Linux and root. Every parameter and each threshold one below, at, and one above; the window edge; half-open, refused, retransmitted and stray connections; other ports; requests and replies matched only with their own; the tables at their limits; ICMPv6, cut messages and random bytes; the golden `ids` output, the live loop (the SSH alert is printed at the packet that completes the tenth connection) and the default rule file. Sabotage: 50 new one-line breaks (349 in all), every one caught. Fuzzing: 3,000,000 inputs (seed 10), 0 failures.
-
-## Stage 11: TLS fingerprint (JA3)
-
-The server name in a ClientHello says who a client talks to. The JA3 fingerprint says what is talking: the TLS library of a program picks the cipher suites, the extensions and their order, so one program gives one fingerprint whatever it connects to.
-
-```
-2023-11-14 22:13:20.018000 IP 10.0.0.1.43000 > 10.0.0.2.443: Flags [P.], seq 1, ack 1, win 64240, length 161: TLS ClientHello, sni example.com, versions [TLS 1.3, TLS 1.2], ciphers (15) [TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, +12 more], ja3 61279becc80ab0e3aca57f5913c3e1a0
-```
-
-**JA3.** The MD5 of one line of five fields, all decimal: the version of the hello, the cipher suites, the extension types, the elliptic curves (extension 10) and the point formats (extension 11), each list in the order sent and joined with `-`, the five joined with `,`. GREASE values (`0x0a0a`, `0x1a1a` ... `0xfafa`, which clients add at random to keep servers honest) are left out, or the fingerprint of one client would change on every connection. This hello gives `771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-10-43,29-23-24,`, and so `61279becc80ab0e3aca57f5913c3e1a0`.
-
-**In the program.** `TlsClientHello` reads the two lists that JA3 needs (`supported_groups`, `ec_point_formats`) and says whether the whole hello was captured and every field read (`complete`). `ja3_string` and `ja3` are properties, and are `None` unless the hello is complete: a cut hello has no fingerprint, and a wrong one would be worse than none. So a hello split over two segments has no `ja3` in `read` (the line ends with `[truncated client hello: 81 of 152 handshake bytes]` and has no `ja3`), while `flows`, which reassembles the stream, does print it.
-
-**Finding a fingerprint.** `--filter "ja3 HASH"` works in `read`, `flows` and `live`, and in the `filter` of a rule of `ids` (the hash is 32 hex digits, in any case, and prints back in lower case).
-
-```
-python -m sentinel read capture.pcap --filter "ja3 61279becc80ab0e3aca57f5913c3e1a0"
-```
-
-**Checked against.** The example of the JA3 specification (`769,47-53-5-10-49161-49162-49171-49172-50-56-19-4,0-10-11,23-24-25,0`) must give `ada70206e40642a3e4461f35503241d5`. And `tshark` computes JA3 too, so `tools/compare_tshark.py` compares it (and the two lists) for every ClientHello it sees: the demo capture and 6 hellos built for the test (with GREASE in every list, without extensions, with repeated values, with values that only look like GREASE) all agree, 203 field values compared, no difference. The same client reaching two names has one fingerprint, another order of the ciphers has another, and two draws of GREASE have the same one (all three are tests).
-
-**Tests.** 895 run here (44 new, 42 of them in `tests/test_ja3.py`), and 6 need Linux and root. Known answers, GREASE in every list and near misses, order and repeats, every shorter prefix of a hello (no fingerprint), every malformed list, the summary line, the filter (the grammar, the errors with their positions, printing back, the corpus) and the real `tshark`. Sabotage: 32 new one-line breaks (381 in all), every one caught. Fuzzing: 3,000,000 inputs (seed 11), 0 failures.
-
-**What it does not show.** Only the client side: no JA3S for the server hello, and no JA4. JA3 depends on the order of the extensions, and some clients now shuffle it on every connection, so their JA3 changes each time. A fingerprint tells software apart; it does not name a program or a person. All of it was tested on hellos I built, and on none that a real browser sent, because no TLS capture of one was available here.
-
-## Stage 12: live capture on Windows
-
-The plan for this stage said "if it turns out to be reliable", so the first thing was to find out. Windows has no packet socket like Linux's `AF_PACKET`. It has a raw socket that can be switched to receive everything (`SIO_RCVALL`) and then gets the IPv4 packets that cross one interface. It needs an Administrator prompt and nothing installed. (Wireshark uses Npcap, a driver. It gives more, but it is a dependency, and this project has none.)
-
-```
-python -m sentinel live 192.168.1.136 --duration 5 --filter "tcp and host 192.168.1.1"
-```
-
-The interface is named by its IPv4 address, the one `ipconfig` prints (`127.0.0.1` for the loopback), because `bind` needs one and Windows has no `/sys/class/net`. Everything after the socket is the pipeline of stage 6: decode, filter, print or run the detectors, `--write`, `--count`, `--duration`, the same exit codes. A name that is not an IPv4 address is an error that says how to name an interface; a missing Administrator token says `live capture needs an Administrator prompt`.
-
-**Is it reliable?** I measured before writing the code, on this machine, from an elevated prompt (its Ethernet interface, its router on the same network, and 127.0.0.1):
-
-- Every packet arrived once, in both directions: a datagram to the machine itself, a datagram to the router, a ping and its reply, a TCP connection to the router. On the loopback address a datagram arrived once (Linux's packet socket gives two copies there).
-- The packets are whole IP packets, from the IP header on, and the length in the header was the length received for all 66 packets of the first try. The TCP checksum of the packets this machine sent was the unfinished sum that the network card completes (Stage 9 recognises it), and of the ones that came in, right: none of the 87 packets of a real run of Sentinel (below) is reported as having a bad checksum. (Not so everywhere: on a GitHub runner the IPv4 header checksum of loopback packets was 0, see Tests below.)
-- A datagram larger than the MTU arrived in pieces, not put back together: the first fragment (1,500 bytes, more-fragments bit set) of two datagrams was seen. The later fragments were not looked at.
-- IPv6: the socket opens, but a ping and a datagram to `::1` delivered nothing, so it is IPv4 only.
-- **The order between the two directions is not the wire order.** In every TCP connection I looked at (7), the ACK that completes the handshake came before the SYN-ACK it answers: `S out, A out, SA in, ...`. The order inside one direction is right. The packet that comes in is handed to the socket after the machine has answered it; I measured this and did not find out why. The time in a line is the time of reading, so the two lines show that order too (the ACK 84 microseconds before the SYN-ACK in one run). `flows` on a saved capture still gets the connection right (4 packets out, 3 in, closed), and the detectors follow the client's own packets (the SYN-flood detector waits for the ACK of the client, which does come after its SYN), but a person reading the lines will see it.
-- Windows does not report dropped packets, so a slow run can lose some and say nothing.
-
-**In the program.** `IpSocket` wraps the raw socket and puts a 14-byte Ethernet header in front of each packet: both addresses zero (a made-up MAC address would look like data), the ethertype 0x86DD if the version nibble is 6 and 0x0800 otherwise. What is not IPv4 or IPv6 goes to the IPv4 parser, which refuses it with a message, so nothing is dropped or raises. A file written with `--write` therefore has Ethernet frames with all-zero addresses. `open_capture` picks the Linux socket if the system has `AF_PACKET` and the Windows one if it has `SIO_RCVALL`, and refuses otherwise. `kernel_drops()` says nothing on Windows, as it does on any system that does not report drops.
-
-**Tried once, for real.** `live 192.168.1.136 -w out.pcap --duration 5` from an elevated prompt, while the machine opened two connections to the router, sent a datagram and a ping, captured 87 packets (the rest was the machine's other traffic). `read` on the file printed the same 87 lines. The connections came out as `closed, pkts 4/3` in `flows`, and `ids` said nothing.
-
-**Tests.** 942 run here (47 new). 5 more run only on Windows as Administrator (`tests/test_live_windows.py`: a datagram to `127.0.0.1` captured, decoded and seen exactly once, a TCP conversation on loopback with its payload once in each direction, the command line saving a datagram, an address no interface has), and 1 only without Administrator rights (the error message); the run of that file passed 8 times in a row here. `tests/test_live_ip.py` (45) uses a stand-in for the socket and runs everywhere: the header and the ethertype for every version nibble, an empty read, 2,000 random reads decoding without raising, every IP packet of the four generated captures coming back identical above Ethernet and printing the same `read` line, the opening of the socket with each error and its message (and the socket closed after it), the names accepted and refused, and a run of 150 handshakes in the order Windows delivers them, which raises no SYN-flood alert, while the same SYNs with no ACK do. CI has a sixth job that runs the Windows file as Administrator and fails if those tests were skipped (`tests/test_ci.py` checks it); its first run, on a GitHub runner (Windows Server 2025), passed 4 of the 5 Administrator tests: the exactly-once test, the TCP conversation, the command line and the missing address all passed there too. The fifth, the decoded datagram, failed on `assert not ip.anomalies`: the runner hands out loopback packets whose IPv4 header checksum is still 0, left to the network card, and Sentinel reports that as `bad ipv4 header checksum`, as its Limits say it does. This machine fills the checksum in, so I had not seen it. The decoder is unchanged (a checksum that is 0 is as wrong as any other); the test now accepts that one anomaly and only with a checksum of exactly 0. The same test failed, with the same message, in the Windows jobs of the main matrix (Python 3.12 and 3.13: 1 failed, 938 passed, 14 skipped): the runner is an Administrator there too, so the real-socket tests are not skipped in them either. With that change all 6 jobs passed: on Windows Server 2025 the two matrix jobs (Python 3.12.10 and 3.13.15) had 939 passed and 14 skipped, and the Administrator job 5 passed and 1 skipped (the one that needs a normal prompt), so the real socket captured, decoded and saw once a datagram, a TCP conversation and a command line on a runner too; on Ubuntu 936 passed and 17 skipped (the Windows file is skipped there), and the root job on Linux stayed green. Sabotage: 24 new one-line breaks (405 in all), every one caught in the end. One old break survived the first run, a stage 7 one that takes Windows out of the CI matrix: the test only looked for the word `windows-latest`, and the new job contains it. The test now checks the matrix line itself. Fuzzing: 3,000,000 inputs (seed 12), 0 failures.
-
-**What it does not show.** IPv6, Ethernet addresses, a drop count, promiscuous mode, Wi-Fi monitor mode, an interface named by anything but its address. The order problem cannot be repaired: the timestamps are taken at reading, so there is nothing to sort by. Only one Windows machine, one Windows version and one network were tried, and none of the tests ran on a busy link.
-
-## Stage 13: real traffic
-
-Until now every detector had been tried on traffic I generated and on a few small public files. This stage runs them on real captures: attacks made by other people, and ordinary traffic that nobody labelled. No code was changed. The built-in rules were used as they are, so the tests, the sabotage run and the fuzzing of stage 12 still stand. The numbers below come from `developing/eval_run.py` and `developing/eval_review.py`, which need the captures and `tshark`. The captures are other people's traffic and stay outside the repository.
-
-**The captures** (7 files, 2,716,636 packets, 211 MB):
-
-| Capture | What it is | Packets | Source |
-|---------|------------|---------|--------|
-| `pkt.TCP.synflood.spoofed.pcap` | a real spoofed SYN flood: only SYNs, from 37,623 different addresses, in 23.7 s | 37,841 | [StopDDoS/packet-captures](https://github.com/StopDDoS/packet-captures) (L.F. Haaijer, 2022) |
-| `pkt.TCP.DOMINATE.syn.ecn.cwr.pcapng` | a SYN flood with the ECN and CWR flags set (a classic pcap file despite the name) | 9,878 | the same |
-| `arpspoofing.pcap` | ARP spoofing on a small LAN | 1,887 | [vivekseth/cs3](https://github.com/vivekseth/cs3), a course repository that does not say where the file comes from |
-| `portscan.pcap` | one host sends 1,365 SYNs to 1,000 different ports of another | 2,401 | the same |
-| `dns-tunnel-iodine.pcap` | a DNS tunnel made by iodine | 438 | [elastic/examples](https://github.com/elastic/examples) |
-| 2026-08-07, "seven days of scans and probes" | what reaches a web server on the internet for a week | 500,923 | [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net/2026/08/07/index.html) |
-| MAWI samplepoint-F, 2025-01-01 14:00 | the first 14.6 s of a 1 Gbps backbone link (the first 60 MiB of the compressed file, fetched with a range request); the packets are cut to 96 bytes | 2,163,268 | [mawi.wide.ad.jp](https://mawi.wide.ad.jp/mawi/) (WIDE project, research use only) |
-
-I checked what is inside the two cs3 files with `tshark`: in the ARP file one MAC address (7c:d1:c3:94:9e:b8) answers for both the gateway, 192.168.0.1, and 192.168.0.103; in the other, 192.168.0.100 sends SYNs to 1,000 different ports of 192.168.0.101.
-
-Not used: CIC-IDS2017 (50 GB and a registration form), Kitsune (19 GB in one zip that the server will not hand over in parts; its 2 GB files are feature tables, not captures) and CTU-13 (its pcap files hold only the botnet's own traffic). The labels of the files I used are per file ("this is a SYN flood"), not per packet.
-
-**Do the detectors fire on real attacks?** Yes, on all five:
-
-| Capture | Alerts | Time |
-|---------|--------|------|
-| spoofed SYN flood | 4 `syn-flood` | 1.2 s |
-| SYN flood with ECN and CWR | 1 `syn-flood` | 0.3 s |
-| ARP spoofing | 5 `arp-spoof` | 0.05 s |
-| port scan | 5 `port-scan` | 0.06 s |
-| iodine tunnel | 3 `dns-tunnel` | 0.02 s |
-
-That is all this shows: the two StopDDoS files hold only attack traffic, so they cannot show a false alarm, and one file of each kind says nothing about how many attacks would be missed.
-
-**Traffic that nobody labelled.** Nobody can say which packets of a backbone are attacks, so the alerts are not scored as right or wrong. `developing/eval_review.py` asks `tshark` two things instead: is what an alert says true (the same count of ports, hosts, SYNs or NXDOMAIN answers, recounted from `tshark`'s own output), and does an independent recount of the same rule find scanners that Sentinel did not report?
-
-- *A week at a web server* (604,798 s): 27 `port-scan` alerts, all of one source probing 15 or more ports of one host, and 1 `dns-tunnel` alert (a random-looking name under `icann.org`; not looked into). `tshark` counts the same number of ports for all 27, and the recount finds the same 16 scanning sources: none missed, none added.
-- *A 1 Gbps backbone* (14.6 s, 2,163,268 packets): 795 alerts. `port-scan`: 627 alerts from 376 sources, and the recount finds the same 376. Of the 626 alerts that SYNs can be counted for, all 626 reach the rule's threshold in `tshark`'s count and 551 have exactly the same number; in the others the recount is higher, which fits a limit in the code (I did not follow each one): a window keeps at most 4 times the threshold in events, so `hosts` in an alert is between 30 and 120 (443 of the 624 say 30) whatever the size of the sweep. The most probed ports were 4117, 23, 22, 80, 443, 34567, 8080 and 2222. The 627th alert is not a scan: it says `19629 packets were not tracked: the detector's state limit was reached`. One table of the port-scan detector reached its 100,000 keys (a source with a host, or a source with a port, seen within the last 10 s), and Sentinel says so, as it was made to. The recount found no scanning source that it had failed to report. The file ends inside a packet (it is the first part of a bigger one), which is reported as `truncated pcap record: 72 of 86 bytes` after every whole packet has been read.
-- `dns-tunnel` on the backbone: 165 alerts, all of the NXDOMAIN check (20 "no such name" answers to one client within 60 s). `tshark` confirms all 165, and shows 31,006 NXDOMAIN answers to 1,815 clients in the 14.6 s, one client with 757. None of the other signals (a long name, entropy, many subdomains) fired. I read these as false alarms of a check that was made for one client, on a link where the clients are resolvers and gateways, but without labels I cannot say so.
-- `syn-flood` on the backbone: 3 alerts, all for 131.112.115.241 port 993 (IMAPS): 100 SYNs from 16, 18 and 22 addresses within one second, and `tshark` counts the same. In the whole slice 844 SYNs from 110 addresses went to that port, and no SYN-ACK from it was captured. That could be an attack, or clients retrying against a server that is down; nothing in the capture says which.
-
-**A mistake of mine.** The first recount said that Sentinel had missed a scanner, 202.121.34.125. It was a router. Its packets were ICMP errors that quote the refused SYN, and my `tshark` filter counted the SYN inside the quote as if the router had sent it. Sentinel does not, and was right. The filter now excludes ICMP.
-
-**Speed.** 50,394 packets/s on the backbone slice (35,073 on the week at the web server and 30,618 on the SYN flood), on the machine of the stage 7 benchmarks. The link carried about 148,000 packets/s, so Sentinel ran at a third of real time.
-
-**What it does not show.** How many packets of an attack it got right, and a false alarm rate: the labels are per file and the two big captures have none. What the alerts say is true of the packets, and whether each one is an attack is another question. One 14.6 s slice of one link and one week at one server. The backbone is not symmetric: only 5.3% of the SYNs have a SYN-ACK in the capture (57.5% for port 443), so "unanswered" cannot be read as "a scan", and a detector that waits for the handshake sees half of it. One ARP spoofing file, one iodine capture, and no SYN flood with ordinary traffic in it. Where the cs3 files come from is not known.
-
-**Found and kept** (limits, not fixed; each is in Limits): the NXDOMAIN threshold on a link of resolvers, the state limit of the detectors on a backbone, and the cap on the counts in a port-scan alert.
+`--rules` takes a file or a directory. Parameters are typed and range-checked, unknown keys are errors, and all problems are reported at once. Defaults live in `rules/default.toml`.
+
+## Verification
+
+| Check | Result |
+|---|---|
+| Tests | 942 (plus 6 Linux-root and 5 Windows-admin live tests); ruff and strict mypy clean |
+| CI | Python 3.12 and 3.13 on Ubuntu and Windows, including live capture on real interfaces |
+| Mutation | 405 deliberate one-line breaks, all caught |
+| Fuzzing | 3,000,000 damaged packets and files, 0 failures |
+| vs. `tshark` | 10 captures, 68,756 field values, 0 unexplained differences |
+| Real traffic | 2.7M packets in 7 third-party captures: every attack capture detected; on a 1 Gbps backbone slice the port-scan sources match an independent `tshark` recount (376/376) |
+
+## Performance
+
+One core, Ryzen 7 5800X, Python 3.13.5, 100,000 small packets (`python -m tools.bench`):
+
+| Stage | packets/s |
+|---|---|
+| decode | 98,710 |
+| `read` (decode + print) | 44,135 |
+| `flows` | 59,330 |
+| `ids` (all detectors) | 42,033 |
+| `live` loop | 27,635–37,716 |
 
 ## Limits
 
-- IPv6: fixed 40-byte header only. Extension headers are not walked and ICMPv6 is not parsed; such packets print as `ip-proto-N`.
-- IP fragments are not reassembled. The first fragment of an IPv4 packet is decoded like any packet (its checksum is not verified); later fragments stop at the IP header.
-- Reassembly is offline: `data()` is read when the capture is done, not delivered as it arrives. Streams are limited to their first 1 MiB. Overlap handling is first-copy-wins; other operating systems may resolve overlaps differently.
-- Flows: TCP and UDP only, VLAN tags are not part of a flow's identity, and a flow idle longer than the timeout is split in two.
-- `read` still works one segment at a time, so it can misread what `flows` gets right: a DNS-over-TCP message split across segments is skipped, and a segment from the middle of a stream that starts with a method name such as `GET ` is read as HTTP.
-- Filters: no host names, no `ether host`, `len`, byte offsets or TCP flag words. `dns`, `http` and `tls` match per packet (a segment that starts a message), not per connection. `flows --filter` filters packets, not whole flows.
-- ARP: Ethernet/IPv4 only. Only link type Ethernet is read. Frames with an 802.3 length instead of an ethertype (an LLC header: spanning tree, NetBIOS, SNAP-encapsulated ARP or IP) print as `802.3` and are not decoded above Ethernet.
-- pcapng: name resolution and interface statistics blocks, comments and packet flags are skipped, and compressed files (`.pcapng.gz`) are not opened. A simple packet block has no timestamp, so a file of only those has every time at 0. Only the generator writes pcapng; `live --write` still saves classic pcap. Files written by Wireshark 4.6.8 were checked in stage 9.
-- VLAN tags keep the VLAN id and drop the priority bits.
-- HTTP is HTTP/1.x only. TLS: ClientHello only, no ALPN, and only the JA3 fingerprint (no JA3S for the server hello, no JA4).
-- IDS: rules are TOML only (no YAML). `ssh_brute_force` counts completed connections and cannot see failed logins; `icmp_tunnel` reads IPv4 only and only messages captured whole, so a short snap length hides large requests. Detectors see one packet at a time, not reassembled streams. Only Ethernet, IPv4/IPv6, TCP, UDP, ARP and DNS fields are used. DNS tunneling is judged by name length, label length, entropy, subdomain count and NXDOMAIN count; hex-encoded tunnels are not caught, and long readable names stay just under the entropy threshold on purpose. A false positive on real traffic, found in stage 10 and not fixed: the public `dns.cap` raises one `dns-tunnel` alert for an Active Directory lookup, `_ldap._tcp.05b5292b-34b8-4fb7-85a3-8beef5fd2069.domains._msdcs.utelsystems.local`, whose GUID label reads as random.
-- Real traffic (stage 13): on a 1 Gbps backbone slice the `dns-tunnel` NXDOMAIN check raised 165 alerts that are probably resolvers and gateways, not tunnels (threshold 20 answers in 60 s), the port-scan detector reached its state limit of 100,000 keys (19,629 packets not tracked, and it says so), and the `hosts` and `ports` counts in a port-scan alert are capped at 4 times the threshold, so a fast sweep is reported at 30 to 120 hosts. Only about a third of the link's packet rate is processed. Not measured: a per-packet false alarm or miss rate.
-- Live capture on Linux: only interfaces of link type Ethernet or loopback (no Wi-Fi monitor mode, no tunnels). On Windows see Stage 12: IPv4 only, no Ethernet header, no drop count, and packets of the two directions are not in wire order. The interface is not put in promiscuous mode, so it sees what it would receive anyway (or what a mirror port sends it). Frames are as the kernel gives them: packets sent by this machine often have checksums that are not filled in yet (the network card does it). A TCP or UDP checksum that is the partial (pseudo-header) sum is recognised and not reported as bad; another unfinished checksum, such as an IPv4 header checksum left to the card, still shows as `[bad ... checksum]`. A VLAN tag may already be removed. `flows` does not work on a live capture. The state-limit alert of a detector is printed when the run ends, not while it runs. The tests that use a real interface (Linux, root) passed once, in CI, on the loopback interface of a Linux runner. Not checked: a real network card, and whether a VLAN tag was already removed. A loopback datagram was captured exactly once, and exactly twice with the copy filter switched off, so the kernel does give two copies and the filter is needed. Everything else was tested with a stand-in for the socket.
-- Printed timestamps have microsecond precision.
-- Developed with Python 3.13 on Windows. CI also ran the tests on Python 3.12 and 3.13, on Ubuntu and Windows, and they passed. Everything but live capture was tested on synthetic traffic and on public captures (in stage 13 the detectors also ran on real attack captures and on 14.6 s of a 1 Gbps backbone, with nobody's labels); the live capture was tried on the loopback interface (Linux, in CI) and on the Ethernet interface of the machine I developed it on (Windows, stage 12), and never on a busy network.
-- Speed: pure Python, one core. The `live` loop handles roughly 30,000 small packets per second on the machine above, so a busy network will make the kernel drop packets.
-- The fuzzer only checks that nothing raises and that output is well formed. It cannot tell a wrong parse from a right one.
+- IPv6 extension headers and ICMPv6 are not parsed. IP fragments are not reassembled.
+- Reassembly is offline and capped at 1 MiB per stream. Overlaps are resolved first-copy-wins.
+- Detectors see packets, not reassembled streams. `ssh_brute_force` counts connections, not failed logins. Hex-encoded DNS tunnels are not caught.
+- On backbone traffic the NXDOMAIN check produces false positives (resolvers look like tunnel clients).
+- Windows live capture: IPv4 only, no Ethernet header, no drop count.
+- Pure Python: a busy network causes kernel drops, which are reported.
 
-## Project layout
+## Layout
 
 ```
-sentinel/pcap/     pcap and pcapng readers, pcap writer
-sentinel/proto/    parsers (ethernet, arp, ipv4, ipv6, tcp, udp, icmp, dns, http, tls) and decode()
-sentinel/flow/     flow table, TCP stream reassembly, per-flow statistics and messages
-sentinel/filter/   filter language: lexer, parser, evaluator
-sentinel/ids/      IDS engine: detectors, sliding window, rule loading, alerts
-sentinel/live/     live capture: a Linux packet socket, or a Windows raw socket
-rules/             default.toml, one rule per detector
-sentinel/summary.py  tcpdump-style line formatting
-sentinel/cli.py    command line entry point
-tools/gen_pcap.py  synthetic traffic generator (uses the project's own pcap writer)
-tools/bench.py     benchmarks: packets per second for every stage
-tools/fuzz.py      fuzzer: damaged packets and capture files through the whole pipeline
-tools/compare_tshark.py  compares Sentinel's decoding with tshark's (needs Wireshark)
-.github/workflows/ci.yml  CI: lint, format, types, tests, fuzz, benchmark, live capture as root and as Administrator
-tests/             pytest tests
-LICENSE            MIT
+sentinel/pcap/     pcap and pcapng I/O
+sentinel/proto/    protocol parsers and decode()
+sentinel/flow/     flow table and TCP reassembly
+sentinel/filter/   filter lexer, parser, evaluator
+sentinel/ids/      detectors, rules, alerts
+sentinel/live/     Linux and Windows capture
+tools/             gen_pcap, bench, fuzz, compare_tshark
+rules/             default rules
 ```
 
 ## Development
