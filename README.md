@@ -67,7 +67,7 @@ window_seconds = 30
 | Tests | 942 (plus 6 Linux-root and 5 Windows-admin live tests); ruff and strict mypy clean |
 | CI | Python 3.12 and 3.13 on Ubuntu and Windows, including live capture on real interfaces |
 | Mutation | 405 deliberate one-line breaks, all caught |
-| Fuzzing | 3,000,000 damaged packets and files, 0 failures |
+| Fuzzing | 18,000,000 damaged packets and files in six runs of 3,000,000, 0 failures |
 | vs. `tshark` | 10 captures, 68,756 field values, 0 unexplained differences |
 | Real traffic | 2.7M packets in 7 third-party captures: every attack capture detected; on a 1 Gbps backbone slice the port-scan sources match an independent `tshark` recount (376/376) |
 
